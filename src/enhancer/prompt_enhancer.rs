@@ -143,8 +143,8 @@ impl PromptEnhancer {
             )
             .await;
 
-        // Build URL
-        let port = self.server.get_port().await;
+        // Build URL - get_port() is synchronous in our custom server.rs
+        let port = self.server.get_port().ok_or_else(|| anyhow!("Server not started"))?;
         let url = format!("http://localhost:{}/enhance?session={}", port, session_id);
         info!("Please open in browser: {}", url);
 

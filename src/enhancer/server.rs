@@ -16,7 +16,7 @@ use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::{oneshot, Mutex, OnceCell, RwLock};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -39,12 +39,14 @@ pub type EnhanceCallback = Arc<
 /// Session data structure
 #[derive(Clone)]
 pub struct SessionData {
+    #[allow(dead_code)]
     pub id: String,
     pub enhanced_prompt: String,
     pub original_prompt: String,
     pub conversation_history: String,
     pub blob_names: Vec<String>,
     pub status: SessionStatus,
+    #[allow(dead_code)]
     pub created_at: Instant,
     pub created_at_ms: u64,
 }
@@ -53,6 +55,7 @@ pub struct SessionData {
 pub enum SessionStatus {
     Pending,
     Completed,
+    #[allow(dead_code)]
     Timeout,
 }
 
@@ -63,123 +66,197 @@ struct SessionResponder {
 
 /// Enhancer HTTP Server
 pub struct EnhancerServer {
-    port: Arc<RwLock<u16>>,
+    /// Port is initialized once when server starts, using OnceCell to ensure
+    /// atomic initialization and prevent race conditions between start() and get_port()
+    port: OnceCell<u16>,
     sessions: Arc<RwLock<HashMap<String, SessionData>>>,
     responders: Arc<Mutex<HashMap<String, SessionResponder>>>,
     enhance_callback: Arc<RwLock<Option<EnhanceCallback>>>,
-    running: Arc<RwLock<bool>>,
-    pub timeout_ms: u64,
+    timeout_ms: u64,
 }
 
 impl EnhancerServer {
     pub fn new() -> Self {
         Self {
-            port: Arc::new(RwLock::new(3000)),
+            port: OnceCell::new(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             responders: Arc::new(Mutex::new(HashMap::new())),
             enhance_callback: Arc::new(RwLock::new(None)),
-            running: Arc::new(RwLock::new(false)),
             timeout_ms: 8 * 60 * 1000, // 8 minutes
         }
     }
 
     /// Start HTTP server
-    pub async fn start(&self) -> Result<()> {
-        {
-            let mut running = self.running.write().await;
-            if *running {
-                return Ok(()); // Already running
-            }
-            *running = true;
-        }
+    /// Uses OnceCell to ensure the server is started exactly once and all callers
+    /// wait for the port to be determined before returning.
+    pub async fn start(&self) -> Result<u16> {
+        // Use get_or_try_init to ensure atomic initialization
+        // All concurrent callers will wait for the first initialization to complete
+        let port = self
+            .port
+            .get_or_try_init(|| async {
+                // Start from port 18080 to avoid conflicts with common dev servers
+                // (React: 3000, Vue: 5173, Vite: 5174, Next.js: 3000, etc.)
+                let start_port = 18080;
+                let max_attempts = 50; // Try up to 50 ports (18080-18129)
+                let mut port = start_port;
+                let mut listener: Option<TcpListener> = None;
+                let mut attempts = 0;
 
-        let mut port = *self.port.read().await;
-        let mut listener: Option<TcpListener> = None;
+                info!("Starting port discovery from port {}", start_port);
 
-        // Try to bind to port, increment if in use
-        for _ in 0..100 {
-            match TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await {
-                Ok(l) => {
-                    listener = Some(l);
-                    break;
-                }
-                Err(e) => {
-                    if e.kind() == std::io::ErrorKind::AddrInUse {
-                        warn!("Port {} is in use, trying {}", port, port + 1);
+                // Try to bind to port, increment if in use
+                // IMPORTANT: Check BOTH 0.0.0.0 and 127.0.0.1 to avoid conflicts
+                // If another process binds to 0.0.0.0:port, it will intercept requests
+                // even if we successfully bind to 127.0.0.1:port
+                for attempt in 0..max_attempts {
+                    attempts = attempt + 1;
+
+                    // First check if 0.0.0.0:port is in use (catches processes binding to all interfaces)
+                    let wildcard_in_use = match TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await {
+                        Ok(test_listener) => {
+                            // Port is free on all interfaces, drop the test listener
+                            drop(test_listener);
+                            false
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => true,
+                        Err(e) => {
+                            // Other errors (permission denied, etc.)
+                            warn!("Failed to check 0.0.0.0:{}: {}", port, e);
+                            true // Treat as in use to be safe
+                        }
+                    };
+
+                    if wildcard_in_use {
+                        if attempt == 0 {
+                            warn!(
+                                "Port {} is in use on 0.0.0.0 (likely by frontend dev server), trying alternative ports...",
+                                port
+                            );
+                        }
                         port += 1;
-                    } else {
-                        let mut running = self.running.write().await;
-                        *running = false;
-                        return Err(anyhow!("Failed to bind to port: {}", e));
+                        if attempt < 5 || attempt % 10 == 0 {
+                            info!("Port {} in use (0.0.0.0), trying port {}...", port - 1, port);
+                        }
+                        continue;
+                    }
+
+                    // Now try to bind to 127.0.0.1 (localhost only) for security
+                    match TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await {
+                        Ok(l) => {
+                            listener = Some(l);
+                            if port != start_port {
+                                info!(
+                                    "Port {} was in use, successfully bound to alternative port {}",
+                                    start_port, port
+                                );
+                            } else {
+                                info!("Successfully bound to default port {}", port);
+                            }
+                            break;
+                        }
+                        Err(e) => {
+                            if e.kind() == std::io::ErrorKind::AddrInUse {
+                                if attempt == 0 {
+                                    warn!(
+                                        "Port {} is in use on 127.0.0.1, trying alternative ports...",
+                                        port
+                                    );
+                                }
+                                port += 1;
+                                if attempt < 5 || attempt % 10 == 0 {
+                                    info!("Port {} in use (127.0.0.1), trying port {}...", port - 1, port);
+                                }
+                            } else {
+                                return Err(anyhow!("Failed to bind to port {}: {}", port, e));
+                            }
+                        }
                     }
                 }
-            }
-        }
 
-        let listener = match listener {
-            Some(l) => l,
-            None => {
-                let mut running = self.running.write().await;
-                *running = false;
-                return Err(anyhow!("Could not find available port"));
-            }
-        };
-
-        {
-            let mut port_lock = self.port.write().await;
-            *port_lock = port;
-        }
-
-        info!("Enhancer server started: http://localhost:{}", port);
-
-        // Clone references for the server task
-        let sessions = self.sessions.clone();
-        let responders = self.responders.clone();
-        let enhance_callback = self.enhance_callback.clone();
-        let timeout_ms = self.timeout_ms;
-
-        // Spawn server task
-        tokio::spawn(async move {
-            loop {
-                let (stream, _) = match listener.accept().await {
-                    Ok(conn) => conn,
-                    Err(e) => {
-                        error!("Failed to accept connection: {}", e);
-                        continue;
+                let listener = match listener {
+                    Some(l) => l,
+                    None => {
+                        return Err(anyhow!(
+                            "Could not find available port after {} attempts (tried ports {}-{})",
+                            attempts,
+                            start_port,
+                            port - 1
+                        ));
                     }
                 };
 
-                let io = TokioIo::new(stream);
-                let sessions = sessions.clone();
-                let responders = responders.clone();
-                let enhance_callback = enhance_callback.clone();
+                info!(
+                    "Enhancer server started: http://localhost:{} (attempted {} ports)",
+                    port, attempts
+                );
 
+                // Clone references for the server task
+                let sessions = self.sessions.clone();
+                let responders = self.responders.clone();
+                let enhance_callback = self.enhance_callback.clone();
+                let timeout_ms = self.timeout_ms;
+
+                // Spawn server task
                 tokio::spawn(async move {
-                    let service = service_fn(|req| {
+                    loop {
+                        let (stream, addr) = match listener.accept().await {
+                            Ok(conn) => conn,
+                            Err(e) => {
+                                error!("Failed to accept connection: {}", e);
+                                continue;
+                            }
+                        };
+
+                        info!("New connection accepted from: {}", addr);
+
+                        let io = TokioIo::new(stream);
                         let sessions = sessions.clone();
                         let responders = responders.clone();
                         let enhance_callback = enhance_callback.clone();
-                        async move {
-                            handle_request(req, sessions, responders, enhance_callback, timeout_ms)
-                                .await
-                        }
-                    });
 
-                    if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
-                        if !e.to_string().contains("connection closed") {
-                            error!("Error serving connection: {}", e);
-                        }
+                        tokio::spawn(async move {
+                            let service = service_fn(|req| {
+                                let sessions = sessions.clone();
+                                let responders = responders.clone();
+                                let enhance_callback = enhance_callback.clone();
+                                async move {
+                                    info!("Service function called for request");
+                                    handle_request(
+                                        req,
+                                        sessions,
+                                        responders,
+                                        enhance_callback,
+                                        timeout_ms,
+                                    )
+                                    .await
+                                }
+                            });
+
+                            info!("Starting to serve connection");
+                            if let Err(e) = http1::Builder::new().serve_connection(io, service).await
+                            {
+                                if !e.to_string().contains("connection closed") {
+                                    error!("Error serving connection: {}", e);
+                                } else {
+                                    info!("Connection closed normally");
+                                }
+                            }
+                        });
                     }
                 });
-            }
-        });
 
-        Ok(())
+                Ok(port)
+            })
+            .await?;
+
+        Ok(*port)
     }
 
     /// Get server port
-    pub async fn get_port(&self) -> u16 {
-        *self.port.read().await
+    /// Returns None if server hasn't been started yet
+    pub fn get_port(&self) -> Option<u16> {
+        self.port.get().copied()
     }
 
     /// Create new session and return a receiver for the result
@@ -290,11 +367,22 @@ async fn handle_request(
     timeout_ms: u64,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let method = req.method().clone();
-    let path = req.uri().path().to_string();
+    let original_path = req.uri().path();
+    let mut path = original_path.to_string();
     let query = req.uri().query().map(|s| s.to_string());
+
+    // Log all incoming requests for debugging
+    info!("Received request: {} {} (original: {})", method, path, original_path);
+
+    // Normalize path: remove trailing slash (except for root)
+    if path.len() > 1 && path.ends_with('/') {
+        path.pop();
+        info!("Normalized path: {} -> {}", original_path, path);
+    }
 
     // Handle CORS preflight
     if method == Method::OPTIONS {
+        info!("Handling CORS preflight request");
         return Ok(cors_response(
             Response::builder()
                 .status(StatusCode::OK)
@@ -303,25 +391,49 @@ async fn handle_request(
         ));
     }
 
+    let method_str = method.to_string();
     let response = match (method, path.as_str()) {
-        (Method::GET, "/enhance") => serve_enhancer_ui(),
-        (Method::GET, "/api/session") => get_session_data(query, sessions, timeout_ms).await,
-        (Method::POST, "/api/submit") => handle_submit(req, sessions, responders).await,
+        // Root path redirects to /enhance
+        (Method::GET, "/") => {
+            info!("Handling root path, redirecting to /enhance");
+            Response::builder()
+                .status(StatusCode::TEMPORARY_REDIRECT)
+                .header("Location", "/enhance")
+                .body(Full::new(Bytes::new()))
+                .unwrap()
+        }
+        // Enhance UI routes (support both with and without trailing slash)
+        (Method::GET, "/enhance") => {
+            info!("Handling /enhance route - serving UI");
+            serve_enhancer_ui()
+        }
+        (Method::GET, "/api/session") => {
+            info!("Handling /api/session route");
+            get_session_data(query, sessions, timeout_ms).await
+        }
+        (Method::POST, "/api/submit") => {
+            info!("Handling /api/submit route");
+            handle_submit(req, sessions, responders).await
+        }
         (Method::POST, "/api/re-enhance") => {
+            info!("Handling /api/re-enhance route");
             handle_re_enhance(req, sessions, enhance_callback).await
         }
-        _ => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .header("Content-Type", "text/plain")
-            .body(Full::new(Bytes::from("Not Found")))
-            .unwrap(),
+        _ => {
+            warn!("No route matched for {} {} (normalized from: {})", method_str, path, original_path);
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .header("Content-Type", "text/plain")
+                .body(Full::new(Bytes::from(format!("Not Found: {} {}", method_str, path))))
+                .unwrap()
+        }
     };
 
     Ok(cors_response(response))
 }
 
 /// Add CORS headers (restricted to localhost only)
-pub fn cors_response(mut response: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
+fn cors_response(mut response: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
     let headers = response.headers_mut();
     headers.insert(
         "Access-Control-Allow-Origin",
@@ -339,12 +451,17 @@ pub fn cors_response(mut response: Response<Full<Bytes>>) -> Response<Full<Bytes
 }
 
 /// Serve Web UI HTML
-pub fn serve_enhancer_ui() -> Response<Full<Bytes>> {
-    Response::builder()
+fn serve_enhancer_ui() -> Response<Full<Bytes>> {
+    info!("serve_enhancer_ui() called - serving HTML UI (size: {} bytes)", ENHANCER_UI_HTML.len());
+    let response = Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "text/html; charset=utf-8")
+        // Allow inline scripts and styles for local development
+        .header("Content-Security-Policy", "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: http://localhost:*; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' http://localhost:*")
         .body(Full::new(Bytes::from(ENHANCER_UI_HTML)))
-        .unwrap()
+        .unwrap();
+    info!("serve_enhancer_ui() returning response with status: {:?}", response.status());
+    response
 }
 
 /// Get session data
@@ -615,10 +732,383 @@ fn json_error_response(status: StatusCode, error: &str) -> Response<Full<Bytes>>
 }
 
 /// Create JSON response
-pub fn json_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
+fn json_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
         .body(Full::new(Bytes::from(body.to_string())))
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ========================================================================
+    // SessionStatus Tests
+    // ========================================================================
+
+    #[test]
+    fn test_session_status_equality() {
+        assert_eq!(SessionStatus::Pending, SessionStatus::Pending);
+        assert_eq!(SessionStatus::Completed, SessionStatus::Completed);
+        assert_eq!(SessionStatus::Timeout, SessionStatus::Timeout);
+        assert_ne!(SessionStatus::Pending, SessionStatus::Completed);
+    }
+
+    #[test]
+    fn test_session_status_clone() {
+        let status = SessionStatus::Pending;
+        let cloned = status.clone();
+        assert_eq!(status, cloned);
+    }
+
+    #[test]
+    fn test_session_status_debug() {
+        let pending = SessionStatus::Pending;
+        let completed = SessionStatus::Completed;
+        let timeout = SessionStatus::Timeout;
+
+        assert_eq!(format!("{:?}", pending), "Pending");
+        assert_eq!(format!("{:?}", completed), "Completed");
+        assert_eq!(format!("{:?}", timeout), "Timeout");
+    }
+
+    #[test]
+    fn test_session_status_all_variants_different() {
+        let variants = [
+            SessionStatus::Pending,
+            SessionStatus::Completed,
+            SessionStatus::Timeout,
+        ];
+
+        for i in 0..variants.len() {
+            for j in 0..variants.len() {
+                if i == j {
+                    assert_eq!(variants[i], variants[j]);
+                } else {
+                    assert_ne!(variants[i], variants[j]);
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // SessionData Tests
+    // ========================================================================
+
+    #[test]
+    fn test_session_data_creation() {
+        let data = SessionData {
+            id: "test-id".to_string(),
+            enhanced_prompt: "enhanced".to_string(),
+            original_prompt: "original".to_string(),
+            conversation_history: "history".to_string(),
+            blob_names: vec!["blob1".to_string()],
+            status: SessionStatus::Pending,
+            created_at: Instant::now(),
+            created_at_ms: 1234567890,
+        };
+
+        assert_eq!(data.id, "test-id");
+        assert_eq!(data.enhanced_prompt, "enhanced");
+        assert_eq!(data.original_prompt, "original");
+        assert_eq!(data.conversation_history, "history");
+        assert_eq!(data.blob_names.len(), 1);
+        assert_eq!(data.status, SessionStatus::Pending);
+    }
+
+    #[test]
+    fn test_session_data_clone() {
+        let data = SessionData {
+            id: "test-id".to_string(),
+            enhanced_prompt: "enhanced".to_string(),
+            original_prompt: "original".to_string(),
+            conversation_history: "history".to_string(),
+            blob_names: vec!["blob1".to_string(), "blob2".to_string()],
+            status: SessionStatus::Pending,
+            created_at: Instant::now(),
+            created_at_ms: 1234567890,
+        };
+
+        let cloned = data.clone();
+        assert_eq!(cloned.id, data.id);
+        assert_eq!(cloned.enhanced_prompt, data.enhanced_prompt);
+        assert_eq!(cloned.original_prompt, data.original_prompt);
+        assert_eq!(cloned.blob_names, data.blob_names);
+        assert_eq!(cloned.status, data.status);
+    }
+
+    #[test]
+    fn test_session_data_with_empty_blobs() {
+        let data = SessionData {
+            id: "test".to_string(),
+            enhanced_prompt: "enhanced".to_string(),
+            original_prompt: "original".to_string(),
+            conversation_history: "".to_string(),
+            blob_names: vec![],
+            status: SessionStatus::Pending,
+            created_at: Instant::now(),
+            created_at_ms: 0,
+        };
+
+        assert!(data.blob_names.is_empty());
+    }
+
+    #[test]
+    fn test_session_data_with_unicode() {
+        let data = SessionData {
+            id: "测试-id".to_string(),
+            enhanced_prompt: "增强的提示".to_string(),
+            original_prompt: "原始提示".to_string(),
+            conversation_history: "用户: 你好\n助手: 你好！".to_string(),
+            blob_names: vec!["文件.rs".to_string()],
+            status: SessionStatus::Pending,
+            created_at: Instant::now(),
+            created_at_ms: 1234567890,
+        };
+
+        assert_eq!(data.enhanced_prompt, "增强的提示");
+        assert!(data.conversation_history.contains("你好"));
+    }
+
+    // ========================================================================
+    // EnhancerServer Tests
+    // ========================================================================
+
+    #[test]
+    fn test_enhancer_server_new() {
+        let _server = EnhancerServer::new();
+        // Server should be created without panicking
+    }
+
+    #[test]
+    fn test_enhancer_server_default() {
+        let _server = EnhancerServer::default();
+        // Default should work the same as new()
+    }
+
+    #[test]
+    fn test_enhancer_server_get_port_before_start() {
+        let server = EnhancerServer::new();
+        // Before start(), get_port() should return None
+        let port = server.get_port();
+        assert!(port.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_enhancer_server_create_session() {
+        let server = EnhancerServer::new();
+        let (session_id, _rx) = server
+            .create_session(
+                "enhanced".to_string(),
+                "original".to_string(),
+                "history".to_string(),
+                vec!["blob".to_string()],
+            )
+            .await;
+
+        // Session ID should be a valid UUID
+        assert!(!session_id.is_empty());
+        assert!(session_id.contains('-')); // UUIDs contain hyphens
+    }
+
+    #[tokio::test]
+    async fn test_enhancer_server_create_multiple_sessions() {
+        let server = EnhancerServer::new();
+
+        let (id1, _rx1) = server
+            .create_session(
+                "enhanced1".to_string(),
+                "original1".to_string(),
+                "history1".to_string(),
+                vec![],
+            )
+            .await;
+
+        let (id2, _rx2) = server
+            .create_session(
+                "enhanced2".to_string(),
+                "original2".to_string(),
+                "history2".to_string(),
+                vec![],
+            )
+            .await;
+
+        // Each session should have a unique ID
+        assert_ne!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn test_enhancer_server_create_session_with_empty_data() {
+        let server = EnhancerServer::new();
+        let (session_id, _rx) = server
+            .create_session("".to_string(), "".to_string(), "".to_string(), vec![])
+            .await;
+
+        assert!(!session_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_enhancer_server_create_session_with_large_data() {
+        let server = EnhancerServer::new();
+        let large_prompt = "x".repeat(100000);
+        let many_blobs: Vec<String> = (0..1000).map(|i| format!("blob_{}", i)).collect();
+
+        let (session_id, _rx) = server
+            .create_session(
+                large_prompt.clone(),
+                large_prompt,
+                "history".to_string(),
+                many_blobs,
+            )
+            .await;
+
+        assert!(!session_id.is_empty());
+    }
+
+    // ========================================================================
+    // JSON Response Helper Tests
+    // ========================================================================
+
+    #[test]
+    fn test_json_response_ok() {
+        let response = json_response(StatusCode::OK, r#"{"success":true}"#);
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_json_response_bad_request() {
+        let response = json_response(StatusCode::BAD_REQUEST, r#"{"error":"bad"}"#);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_json_response_not_found() {
+        let response = json_response(StatusCode::NOT_FOUND, r#"{"error":"not found"}"#);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_json_response_internal_error() {
+        let response = json_response(StatusCode::INTERNAL_SERVER_ERROR, r#"{"error":"internal"}"#);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn test_json_response_content_type() {
+        let response = json_response(StatusCode::OK, "{}");
+        let content_type = response.headers().get("Content-Type").unwrap();
+        assert_eq!(content_type, "application/json");
+    }
+
+    #[test]
+    fn test_json_response_empty_body() {
+        let response = json_response(StatusCode::OK, "");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_json_response_with_unicode() {
+        let response = json_response(StatusCode::OK, r#"{"message":"你好世界"}"#);
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    // ========================================================================
+    // CORS Response Tests
+    // ========================================================================
+
+    #[test]
+    fn test_cors_response_adds_headers() {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+
+        let cors_resp = cors_response(response);
+
+        assert!(cors_resp
+            .headers()
+            .contains_key("Access-Control-Allow-Origin"));
+        assert!(cors_resp
+            .headers()
+            .contains_key("Access-Control-Allow-Methods"));
+        assert!(cors_resp
+            .headers()
+            .contains_key("Access-Control-Allow-Headers"));
+    }
+
+    #[test]
+    fn test_cors_response_allows_localhost_origin() {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+
+        let cors_resp = cors_response(response);
+        let origin = cors_resp
+            .headers()
+            .get("Access-Control-Allow-Origin")
+            .unwrap();
+        assert_eq!(origin, "http://localhost");
+    }
+
+    #[test]
+    fn test_cors_response_allows_required_methods() {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+
+        let cors_resp = cors_response(response);
+        let methods = cors_resp
+            .headers()
+            .get("Access-Control-Allow-Methods")
+            .unwrap();
+        let methods_str = methods.to_str().unwrap();
+
+        assert!(methods_str.contains("GET"));
+        assert!(methods_str.contains("POST"));
+        assert!(methods_str.contains("OPTIONS"));
+    }
+
+    #[test]
+    fn test_cors_response_preserves_status() {
+        let response = Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+
+        let cors_resp = cors_response(response);
+        assert_eq!(cors_resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ========================================================================
+    // serve_enhancer_ui Tests
+    // ========================================================================
+
+    #[test]
+    fn test_serve_enhancer_ui_returns_ok() {
+        let response = serve_enhancer_ui();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn test_serve_enhancer_ui_content_type() {
+        let response = serve_enhancer_ui();
+        let content_type = response.headers().get("Content-Type").unwrap();
+        assert!(content_type.to_str().unwrap().contains("text/html"));
+        assert!(content_type.to_str().unwrap().contains("utf-8"));
+    }
+
+    // ========================================================================
+    // Timeout Configuration Tests
+    // ========================================================================
+
+    #[test]
+    fn test_timeout_is_8_minutes() {
+        let server = EnhancerServer::new();
+        // The timeout is 8 * 60 * 1000 = 480000 ms
+        assert_eq!(server.timeout_ms, 8 * 60 * 1000);
+    }
 }
