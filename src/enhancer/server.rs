@@ -95,10 +95,10 @@ impl EnhancerServer {
         let port = self
             .port
             .get_or_try_init(|| async {
-                // Start from port 18080 to avoid conflicts with common dev servers
-                // (React: 3000, Vue: 5173, Vite: 5174, Next.js: 3000, etc.)
-                let start_port = 18080;
-                let max_attempts = 50; // Try up to 50 ports (18080-18129)
+                // Start from port 3000 (official default)
+                // With robust conflict detection for 0.0.0.0 and 127.0.0.1
+                let start_port = 3000;
+                let max_attempts = 50; // Try up to 50 ports (3000-3049) for plenty of backup
                 let mut port = start_port;
                 let mut listener: Option<TcpListener> = None;
                 let mut attempts = 0;
