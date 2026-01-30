@@ -23,8 +23,8 @@ pub const NODE_ID_NEW: i32 = 0;
 /// Node ID for OLD endpoint
 pub const NODE_ID_OLD: i32 = 1;
 
-/// User-Agent header value (matches augment.mjs format: augment.cli/{version}/{mode})
-const USER_AGENT: &str = "augment.cli/0.12.0/mcp";
+/// User-Agent header value (mimics official VS Code extension for rate limit parity)
+const USER_AGENT: &str = "augment-vscode-extension/0.768.0";
 
 /// Redacted token placeholder for logging
 const REDACTED_TOKEN: &str = "<redacted>";

@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, ValueEnum};
 use std::env;
 use tracing::{error, info, warn};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 
 #[derive(ValueEnum, Debug, Copy, Clone)]
 enum TransportArg {
@@ -62,6 +62,14 @@ struct Args {
     #[arg(long, default_value = "false")]
     index_only: bool,
 
+    /// Write logs to file (path or dir; default: .ace-tool/acemcp.log in project dir)
+    #[arg(long, env = "ACE_LOG_FILE")]
+    log_file: Option<String>,
+
+    /// Log level override (trace|debug|info|warn|error, default from RUST_LOG)
+    #[arg(long, env = "ACE_LOG_LEVEL")]
+    log_level: Option<String>,
+
     /// Enhance a prompt and output the result to stdout, then exit
     #[arg(long)]
     enhance_prompt: Option<String>,
@@ -69,13 +77,64 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing for stderr (MCP uses stdout for protocol)
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
-        .with(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
-
     let args = Args::parse();
+
+    // Initialize tracing: stderr always (MCP uses stdout for protocol)
+    // Optionally add file layer when --log-file is set
+    let env_filter = args.log_level.as_deref().map_or_else(
+        || tracing_subscriber::EnvFilter::from_default_env(),
+        |level| {
+            tracing_subscriber::EnvFilter::try_new(level)
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::from_default_env())
+        },
+    );
+
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_ansi(true);
+
+    let mut layers: Vec<
+        Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>,
+    > = vec![Box::new(fmt_layer.with_filter(env_filter.clone()))];
+
+    let _guard = if let Some(ref log_path) = args.log_file {
+        use tracing_appender::rolling::{RollingFileAppender, Rotation};
+
+        let path = std::path::Path::new(log_path);
+        let (log_dir, prefix) = if path.extension().is_some() {
+            // e.g. .ace-tool/acemcp.log -> dir=.ace-tool, prefix=acemcp
+            let dir = path.parent().unwrap_or(std::path::Path::new("."));
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("acemcp");
+            (dir.to_path_buf(), stem.to_string())
+        } else {
+            // e.g. .ace-tool or C:\logs -> dir=path, prefix=acemcp
+            (path.to_path_buf(), "acemcp".to_string())
+        };
+        if !log_dir.exists() {
+            let _ = std::fs::create_dir_all(&log_dir);
+        }
+        let file_appender = RollingFileAppender::new(Rotation::DAILY, &log_dir, prefix.clone());
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking)
+            .with_ansi(false)
+            .with_target(true)
+            .with_thread_ids(false)
+            .with_filter(env_filter);
+        layers.push(Box::new(file_layer));
+        Some(guard)
+    } else {
+        None
+    };
+
+    tracing_subscriber::registry().with(layers).init();
+
+    if args.log_file.is_some() {
+        info!("Log file enabled: {:?}", args.log_file);
+    }
 
     // Enhance-prompt mode: enhance the prompt and output to stdout
     if let Some(ref prompt) = args.enhance_prompt {

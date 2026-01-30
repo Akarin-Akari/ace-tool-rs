@@ -95,10 +95,10 @@ impl EnhancerServer {
         let port = self
             .port
             .get_or_try_init(|| async {
-                // Start from port 3000 (official default)
+                // Start from port 3010 (custom default to avoid conflicts with common dev servers)
                 // With robust conflict detection for 0.0.0.0 and 127.0.0.1
-                let start_port = 3000;
-                let max_attempts = 50; // Try up to 50 ports (3000-3049) for plenty of backup
+                let start_port = 3010;
+                let max_attempts = 50; // Try up to 50 ports (3010-3059) for plenty of backup
                 let mut port = start_port;
                 let mut listener: Option<TcpListener> = None;
                 let mut attempts = 0;

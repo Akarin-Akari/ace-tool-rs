@@ -406,6 +406,7 @@ impl McpServer {
 
         let tool_name = normalize_tool_name(&call_params.name);
 
+        info!(tool = tool_name, "mcp: tool call");
         match tool_name {
             "search_context" => {
                 let args: SearchContextArgs = match call_params.arguments {
@@ -422,9 +423,17 @@ impl McpServer {
                     None => SearchContextArgs::default(),
                 };
 
+                let query = args.query.as_deref().unwrap_or("");
+                info!(tool = "search_context", query = %query, "mcp: executing");
                 let tool = SearchContextTool::new(self.config.clone());
                 let result = tool.execute(args).await;
-
+                let success = !result.text.starts_with("Error:");
+                info!(
+                    tool = "search_context",
+                    success,
+                    result_len = result.text.len(),
+                    "mcp: result"
+                );
                 let call_result = CallToolResult {
                     content: vec![TextContent::new(result.text)],
                 };

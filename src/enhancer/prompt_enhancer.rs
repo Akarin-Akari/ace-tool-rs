@@ -32,7 +32,7 @@ pub const ENV_ENHANCER_ENDPOINT: &str = "ACE_ENHANCER_ENDPOINT";
 pub fn get_enhancer_endpoint() -> EnhancerEndpoint {
     std::env::var(ENV_ENHANCER_ENDPOINT)
         .map(|v| EnhancerEndpoint::from_env_str(&v))
-        .unwrap_or(EnhancerEndpoint::New)
+        .unwrap_or(EnhancerEndpoint::Old) // Changed from New to Old to avoid API风控
 }
 
 /// Prompt Enhancer

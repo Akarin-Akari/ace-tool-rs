@@ -28,7 +28,7 @@ bincode = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "brotli", "deflate", "http2", "charset", "rustls-tls-native-roots"] }
 
 # CLI argument parsing
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Cryptography (SHA-256)
 sha2 = "0.10"
@@ -47,6 +47,7 @@ anyhow = "1"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # Async utilities
 futures = "0.3"

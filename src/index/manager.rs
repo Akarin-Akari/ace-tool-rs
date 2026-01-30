@@ -38,8 +38,8 @@ const MAX_INDEX_BYTES: u64 = 256 * 1024 * 1024;
 /// Current index format version
 const CURRENT_INDEX_VERSION: u32 = 2;
 
-/// User-Agent header value (matches augment.mjs format: augment.cli/{version}/{mode})
-const USER_AGENT: &str = "augment.cli/0.12.0/mcp";
+/// User-Agent header value (mimics official VS Code extension for rate limit parity)
+const USER_AGENT: &str = "augment-vscode-extension/0.768.0";
 
 /// Generate a unique request ID
 fn generate_request_id() -> String {
@@ -1262,7 +1262,7 @@ impl IndexManager {
 
     /// Search code context
     pub async fn search_context(&self, query: &str) -> Result<String> {
-        info!("Starting search: {}", query);
+        info!(query = %query, "search_context: start");
 
         // Auto-index first
         let index_result = self.index_project().await;
@@ -1283,131 +1283,230 @@ impl IndexManager {
             return Err(anyhow!("No blobs found after indexing"));
         }
 
-        // Execute search
-        info!("Searching {} chunks...", blob_names.len());
+        // Execute search with 429/5xx retry (same strategy as upload_batch_internal)
+        let chunk_count = blob_names.len();
+        info!(chunks = chunk_count, "search_context: searching");
 
         let url = format!("{}/agents/codebase-retrieval", self.base_url);
-        let request = SearchRequest {
-            information_request: query.to_string(),
-            blobs: BlobsPayload {
-                checkpoint_id: None,
-                added_blobs: blob_names,
-                deleted_blobs: Vec::new(),
-            },
-            dialog: Vec::new(),
-            max_output_length: 0,
-            disable_codebase_retrieval: false,
-            enable_commit_retrieval: false,
-        };
+        let max_retries = 3;
 
-        let request_id = generate_request_id();
-        let start_time = Instant::now();
+        for attempt in 0..max_retries {
+            if attempt > 0 {
+                info!(attempt = attempt + 1, max_retries, "search_context: retry");
+            }
+            let request = SearchRequest {
+                information_request: query.to_string(),
+                blobs: BlobsPayload {
+                    checkpoint_id: None,
+                    added_blobs: blob_names.clone(),
+                    deleted_blobs: Vec::new(),
+                },
+                dialog: Vec::new(),
+                max_output_length: 0,
+                disable_codebase_retrieval: false,
+                enable_commit_retrieval: false,
+            };
 
-        // Lazy serialization: only serialize body if logging is enabled
-        let http_request_log = if http_logger::is_enabled() {
-            let request_body = serde_json::to_string(&request).ok();
-            Some(HttpRequestLog {
-                method: "POST".to_string(),
-                url: url.clone(),
-                headers: http_logger::extract_headers_from_builder(
-                    "application/json",
-                    USER_AGENT,
-                    &request_id,
-                    get_session_id(),
-                    &self.token,
-                ),
-                body: request_body,
-            })
-        } else {
-            None
-        };
+            let request_id = generate_request_id();
+            let start_time = Instant::now();
 
-        let response = self
-            .client
-            .post(&url)
-            .timeout(Duration::from_secs(self.retrieval_timeout_secs))
-            .header("Content-Type", "application/json")
-            .header("User-Agent", USER_AGENT)
-            .header("x-request-id", &request_id)
-            .header("x-request-session-id", get_session_id())
-            .header("Authorization", format!("Bearer {}", self.token))
-            .json(&request)
-            .send()
-            .await;
+            let http_request_log = if http_logger::is_enabled() {
+                let request_body = serde_json::to_string(&request).ok();
+                Some(HttpRequestLog {
+                    method: "POST".to_string(),
+                    url: url.clone(),
+                    headers: http_logger::extract_headers_from_builder(
+                        "application/json",
+                        USER_AGENT,
+                        &request_id,
+                        get_session_id(),
+                        &self.token,
+                    ),
+                    body: request_body,
+                })
+            } else {
+                None
+            };
 
-        let duration_ms = start_time.elapsed().as_millis() as u64;
+            let response = self
+                .client
+                .post(&url)
+                .timeout(Duration::from_secs(self.retrieval_timeout_secs))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", USER_AGENT)
+                .header("x-request-id", &request_id)
+                .header("x-request-session-id", get_session_id())
+                .header("Authorization", format!("Bearer {}", self.token))
+                .json(&request)
+                .send()
+                .await;
 
-        match response {
-            Ok(resp) => {
-                let status = resp.status();
-                let response_headers = if http_logger::is_enabled() {
-                    http_logger::extract_response_headers(&resp)
-                } else {
-                    Vec::new()
-                };
+            let duration_ms = start_time.elapsed().as_millis() as u64;
 
-                if !status.is_success() {
-                    let text = resp.text().await.unwrap_or_default();
-                    if let Some(ref req_log) = http_request_log {
-                        let response_log = HttpResponseLog {
-                            status: status.as_u16(),
-                            headers: response_headers,
-                            body: Some(text.clone()),
+            match response {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let response_headers = if http_logger::is_enabled() {
+                        http_logger::extract_response_headers(&resp)
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Extract Retry-After before consuming body (same as upload)
+                    let retry_after = resp
+                        .headers()
+                        .get("Retry-After")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(1);
+
+                    if status == 401 || status == 403 {
+                        let text = resp.text().await.unwrap_or_default();
+                        if let Some(ref req_log) = http_request_log {
+                            http_logger::log_request(
+                                Some(&self.project_root),
+                                req_log,
+                                Some(&HttpResponseLog {
+                                    status: status.as_u16(),
+                                    headers: response_headers,
+                                    body: Some("Auth error".to_string()),
+                                }),
+                                duration_ms,
+                                None,
+                            );
+                        }
+                        return Err(anyhow!("Search failed: {} - {}", status, text));
+                    }
+
+                    if status.is_success() {
+                        let body_text = resp.text().await.unwrap_or_default();
+                        if let Some(ref req_log) = http_request_log {
+                            http_logger::log_request(
+                                Some(&self.project_root),
+                                req_log,
+                                Some(&HttpResponseLog {
+                                    status: status.as_u16(),
+                                    headers: response_headers,
+                                    body: Some(body_text.clone()),
+                                }),
+                                duration_ms,
+                                None,
+                            );
+                        }
+                        let search_response: SearchResponse = serde_json::from_str(&body_text)?;
+                        return match search_response.formatted_retrieval {
+                            Some(result) if !result.is_empty() => {
+                                info!(
+                                    result_len = result.len(),
+                                    duration_ms, "search_context: success"
+                                );
+                                Ok(result)
+                            }
+                            _ => {
+                                info!(duration_ms, "search_context: no relevant code found");
+                                Ok("No relevant code context found for your query.".to_string())
+                            }
                         };
+                    }
+
+                    let text = resp.text().await.unwrap_or_default();
+
+                    if status == 429 && attempt < max_retries - 1 {
+                        let wait_time = retry_after * 1000;
+                        if let Some(ref req_log) = http_request_log {
+                            http_logger::log_request(
+                                Some(&self.project_root),
+                                req_log,
+                                Some(&HttpResponseLog {
+                                    status: status.as_u16(),
+                                    headers: response_headers,
+                                    body: None,
+                                }),
+                                duration_ms,
+                                Some(&format!("Rate limited, retrying in {}ms", wait_time)),
+                            );
+                        }
+                        warn!(
+                            attempt = attempt + 1,
+                            max_retries,
+                            wait_ms = wait_time,
+                            retry_after_header = retry_after,
+                            "search_context: 429 rate limited, retrying"
+                        );
+                        tokio::time::sleep(Duration::from_millis(wait_time)).await;
+                        continue;
+                    }
+
+                    if status.is_server_error() && attempt < max_retries - 1 {
+                        let wait_time = 1000 * (1 << attempt);
+                        if let Some(ref req_log) = http_request_log {
+                            http_logger::log_request(
+                                Some(&self.project_root),
+                                req_log,
+                                Some(&HttpResponseLog {
+                                    status: status.as_u16(),
+                                    headers: response_headers,
+                                    body: None,
+                                }),
+                                duration_ms,
+                                Some(&format!("Server error, retrying in {}ms", wait_time)),
+                            );
+                        }
+                        warn!(
+                            attempt = attempt + 1,
+                            max_retries,
+                            wait_ms = wait_time,
+                            status = %status,
+                            "search_context: 5xx server error, retrying"
+                        );
+                        tokio::time::sleep(Duration::from_millis(wait_time)).await;
+                        continue;
+                    }
+
+                    if let Some(ref req_log) = http_request_log {
                         http_logger::log_request(
                             Some(&self.project_root),
                             req_log,
-                            Some(&response_log),
+                            Some(&HttpResponseLog {
+                                status: status.as_u16(),
+                                headers: response_headers,
+                                body: Some(text.clone()),
+                            }),
                             duration_ms,
                             Some(&format!("Search failed: {} - {}", status, text)),
                         );
                     }
                     return Err(anyhow!("Search failed: {} - {}", status, text));
                 }
-
-                let body_text = resp.text().await.unwrap_or_default();
-                if let Some(ref req_log) = http_request_log {
-                    let response_log = HttpResponseLog {
-                        status: status.as_u16(),
-                        headers: response_headers,
-                        body: Some(body_text.clone()),
-                    };
-                    http_logger::log_request(
-                        Some(&self.project_root),
-                        req_log,
-                        Some(&response_log),
-                        duration_ms,
-                        None,
-                    );
-                }
-
-                let search_response: SearchResponse = serde_json::from_str(&body_text)?;
-
-                match search_response.formatted_retrieval {
-                    Some(result) if !result.is_empty() => {
-                        info!("Search complete");
-                        Ok(result)
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    if let Some(ref req_log) = http_request_log {
+                        http_logger::log_request(
+                            Some(&self.project_root),
+                            req_log,
+                            None,
+                            duration_ms,
+                            Some(&error_msg),
+                        );
                     }
-                    _ => {
-                        info!("No relevant code found");
-                        Ok("No relevant code context found for your query.".to_string())
+                    if attempt < max_retries - 1 {
+                        let wait_time = 1000 * (1 << attempt);
+                        warn!(
+                            attempt = attempt + 1,
+                            max_retries,
+                            wait_ms = wait_time,
+                            error = %error_msg,
+                            "search_context: request failed (timeout/network), retrying"
+                        );
+                        tokio::time::sleep(Duration::from_millis(wait_time)).await;
+                        continue;
                     }
+                    return Err(anyhow!("Search request failed: {}", error_msg));
                 }
-            }
-            Err(e) => {
-                let error_msg = e.to_string();
-                if let Some(ref req_log) = http_request_log {
-                    http_logger::log_request(
-                        Some(&self.project_root),
-                        req_log,
-                        None,
-                        duration_ms,
-                        Some(&error_msg),
-                    );
-                }
-                Err(anyhow!("Search request failed: {}", error_msg))
             }
         }
+
+        Err(anyhow!("Search failed after {} retries", max_retries))
     }
 }
 
