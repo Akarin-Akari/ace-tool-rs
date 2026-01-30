@@ -26,11 +26,11 @@ use crate::strategy::{AdaptiveStrategy, ErrorType};
 use crate::utils::path_normalizer::{normalize_path, normalize_relative_path, RuntimeEnv};
 use crate::utils::project_detector::get_index_file_path;
 
-/// Maximum blob size in bytes (500KB)
-const MAX_BLOB_SIZE: usize = 500 * 1024;
+/// Maximum blob size in bytes (128KB, aligned with official augment.mjs)
+const MAX_BLOB_SIZE: usize = 128 * 1024;
 
-/// Maximum batch size in bytes (5MB)
-const MAX_BATCH_SIZE: usize = 5 * 1024 * 1024;
+/// Maximum batch size in bytes (1MB, aligned with official augment.mjs)
+const MAX_BATCH_SIZE: usize = 1024 * 1024;
 
 /// Maximum index size in bytes (256MB)
 const MAX_INDEX_BYTES: u64 = 256 * 1024 * 1024;
@@ -298,7 +298,15 @@ impl IndexManager {
     fn should_exclude(&self, path: &Path, is_dir: bool, gitignore: Option<&Gitignore>) -> bool {
         let relative_path = match path.strip_prefix(&self.project_root) {
             Ok(p) => p,
-            Err(_) => return false,
+            Err(_) => {
+                // Fail-closed: if we can't determine the relative path, exclude the file for safety
+                // This can happen due to path normalization issues (e.g., Windows \\?\ prefixes)
+                warn!(
+                    "Path prefix mismatch, excluding for safety: {:?} vs {:?}",
+                    path, self.project_root
+                );
+                return true;
+            }
         };
 
         let path_str = normalize_relative_path(&relative_path.to_string_lossy());
@@ -1655,7 +1663,15 @@ fn should_exclude_standalone(
 ) -> bool {
     let relative_path = match path.strip_prefix(project_root) {
         Ok(p) => p,
-        Err(_) => return false,
+        Err(_) => {
+            // Fail-closed: if we can't determine the relative path, exclude the file for safety
+            // This can happen due to path normalization issues (e.g., Windows \\?\ prefixes)
+            warn!(
+                "Path prefix mismatch, excluding for safety: {:?} vs {:?}",
+                path, project_root
+            );
+            return true;
+        }
     };
 
     let path_str = normalize_relative_path(&relative_path.to_string_lossy());

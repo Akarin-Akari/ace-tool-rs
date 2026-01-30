@@ -27,6 +27,21 @@ ace-tool-rs is a Rust implementation of a codebase context engine that enables A
 
 ## Installation
 
+### Quick Start (Recommended)
+
+The easiest way to install and run ace-tool-rs is via npx:
+
+```bash
+npx ace-tool-rs --base-url <API_URL> --token <AUTH_TOKEN>
+```
+
+This will automatically download the appropriate binary for your platform and run it.
+
+**Supported platforms:**
+- Windows (x64)
+- macOS (x64, ARM64)
+- Linux (x64, ARM64)
+
 ### From Source
 
 ```bash
@@ -64,6 +79,7 @@ ace-tool-rs --base-url <API_URL> --token <AUTH_TOKEN>
 | `--upload-timeout` | Override upload timeout in seconds (disables adaptive timeout) |
 | `--upload-concurrency` | Override upload concurrency (disables adaptive concurrency) |
 | `--no-adaptive` | Disable adaptive strategy, use static heuristic values |
+| `--no-webbrowser-enhance-prompt` | Disable web browser interaction for enhance_prompt, return API result directly |
 | `--index-only` | Index current directory and exit (no MCP server) |
 | `--enhance-prompt` | Enhance a prompt and output the result to stdout, then exit |
 | `--max-lines-per-blob` | Maximum lines per blob chunk (default: 800) |
@@ -74,6 +90,7 @@ ace-tool-rs --base-url <API_URL> --token <AUTH_TOKEN>
 | Variable | Description |
 |----------|-------------|
 | `RUST_LOG` | Set log level (e.g., `info`, `debug`, `warn`) |
+| `PROMPT_ENHANCER` | Control `enhance_prompt` tool exposure: set to `disabled`, `false`, `0`, or `off` to hide and disable the tool |
 | `ACE_ENHANCER_ENDPOINT` | Endpoint selection: `new` (default), `old`, `claude`, `openai`, or `gemini` |
 | `PROMPT_ENHANCER_BASE_URL` | Base URL for third-party API (required for `claude`/`openai`/`gemini`) |
 | `PROMPT_ENHANCER_TOKEN` | API key for third-party API (required for `claude`/`openai`/`gemini`) |
@@ -103,8 +120,8 @@ Add to your Codex config file (typically `~/.codex/config.toml`):
 
 ```toml
 [mcp_servers.ace-tool]
-command = "/path/to/ace-tool-rs"
-args = ["--base-url", "https://api.example.com", "--token", "your-token-here", "--transport", "lsp"]
+command = "npx"
+args = ["ace-tool-rs", "--base-url", "https://api.example.com", "--token", "your-token-here", "--transport", "lsp"]
 env = { RUST_LOG = "info" }
 startup_timeout_ms = 60000
 ```
@@ -120,8 +137,9 @@ Add to your Claude Desktop configuration file:
 {
   "mcpServers": {
     "ace-tool": {
-      "command": "/path/to/ace-tool-rs",
+      "command": "npx",
       "args": [
+        "ace-tool-rs",
         "--base-url", "https://api.example.com",
         "--token", "your-token-here"
       ]
@@ -135,7 +153,7 @@ Add to your Claude Desktop configuration file:
 Run command like below:
 
 ```bash
-claude mcp add-json ace-tool --scope user '{"type":"stdio","command":"/path/to/ace-tool-rs","args":["--base-url",  "https://api.example.com/",  "--token", "your-token-here"],"env":{}}'
+claude mcp add-json ace-tool --scope user '{"type":"stdio","command":"npx","args":["ace-tool-rs","--base-url","https://api.example.com/","--token","your-token-here"],"env":{}}'
 ```
 
 Modify `~/.claude/settings.json` to add permission for the tools:
@@ -396,8 +414,8 @@ cargo clippy
 
 - Only processes the root `.gitignore` file (nested `.gitignore` files are not supported)
 - Requires network access to the indexing API
-- Maximum file size: 500KB per file
-- Maximum batch size: 5MB per upload batch
+- Maximum file size: 128KB per file
+- Maximum batch size: 1MB per upload batch
 
 ## License
 
@@ -434,3 +452,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 3. Commit your changes (`git commit -m 'Add some amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
+
+## Star History
+
+[![Star History Chart](https://starchart.cc/missdeer/ace-tool-rs.svg)](https://starchart.cc/missdeer/ace-tool-rs)

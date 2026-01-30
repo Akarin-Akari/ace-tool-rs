@@ -7,6 +7,12 @@ const https = require("https");
 const os = require("os");
 const crypto = require("crypto");
 
+// Note: We do not use 'kexec' to replace the process because the available packages 
+// are largely unmaintained or have compatibility issues with modern Node.js versions.
+// Instead, we spawn the child and forward signals/stdio.
+// Crucially, we ensure the wrapper ONLY writes to stderr (logs, extraction output)
+// so that the Rust binary's stdout (MCP JSON-RPC) is the only thing on stdout.
+
 const PACKAGE_NAME = "ace-tool-rs";
 const REPO_OWNER = "missdeer";
 const REPO_NAME = "ace-tool-rs";
@@ -88,19 +94,23 @@ function getAssetName() {
       // macOS uses universal binary (supports both x64 and arm64)
       return "ace-tool-rs_Darwin_universal.tar.gz";
     case "linux":
-      if (arch !== "x64") {
-        throw new Error(
-          `Unsupported architecture: ${arch} on Linux. Only x64 is supported.`
-        );
+      if (arch === "x64") {
+        return "ace-tool-rs_Linux_x86_64.tar.gz";
+      } else if (arch === "arm64") {
+        return "ace-tool-rs_Linux_aarch64.tar.gz";
       }
-      return "ace-tool-rs_Linux_x86_64.tar.gz";
+      throw new Error(
+        `Unsupported architecture: ${arch} on Linux. Only x64 and arm64 are supported.`
+      );
     case "win32":
-      if (arch !== "x64") {
-        throw new Error(
-          `Unsupported architecture: ${arch} on Windows. Only x64 is supported.`
-        );
+      if (arch === "x64") {
+        return "ace-tool-rs_Windows_x86_64.zip";
+      } else if (arch === "arm64") {
+        return "ace-tool-rs_Windows_aarch64.zip";
       }
-      return "ace-tool-rs_Windows_x86_64.zip";
+      throw new Error(
+        `Unsupported architecture: ${arch} on Windows. Only x64 and arm64 are supported.`
+      );
     default:
       throw new Error(`Unsupported platform: ${platform}`);
   }
@@ -199,7 +209,7 @@ async function getReleaseByTag(version) {
   } catch (error) {
     // If the specific version tag doesn't exist, fall back to latest
     if (error.message.includes("404")) {
-      console.log(
+      console.error(
         `Release v${version} not found, falling back to latest release...`
       );
       return getLatestRelease();
@@ -304,8 +314,9 @@ function downloadToFile(url, destPath, options = {}, redirectCount = 0) {
 
 async function extractTarGz(archivePath, destDir) {
   return new Promise((resolve, reject) => {
+    // Redirect stdout to stderr to prevent MCP corruption
     const tar = spawn("tar", ["-xzf", archivePath, "-C", destDir], {
-      stdio: "inherit",
+      stdio: ["ignore", process.stderr, process.stderr],
     });
     tar.on("close", (code) => {
       if (code === 0) resolve();
@@ -325,6 +336,7 @@ async function extractZip(archivePath, destDir) {
   return new Promise((resolve, reject) => {
     // Escape paths for PowerShell: escape backticks and single quotes
     const escapePath = (p) => p.replace(/`/g, "``").replace(/'/g, "''");
+    // Redirect stdout to stderr to prevent MCP corruption
     const unzipProcess = spawn(
       "powershell",
       [
@@ -334,7 +346,7 @@ async function extractZip(archivePath, destDir) {
         "-Command",
         `Expand-Archive -LiteralPath '${escapePath(archivePath)}' -DestinationPath '${escapePath(destDir)}' -Force`,
       ],
-      { stdio: "inherit" }
+      { stdio: ["ignore", process.stderr, process.stderr] }
     );
     unzipProcess.on("close", (code) => {
       if (code === 0) resolve();
@@ -412,7 +424,7 @@ async function downloadAndExtract(cacheDir) {
   // Try to acquire lock
   if (!acquireLock(lockPath)) {
     // Wait for other process to complete
-    console.log("Another process is downloading, waiting...");
+    console.error("Another process is downloading, waiting...");
     let attempts = 0;
     while (!fs.existsSync(binaryPath) && attempts < 60) {
       await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -432,7 +444,7 @@ async function downloadAndExtract(cacheDir) {
 
     // Get release for the specific version (with retry)
     const version = getPackageVersion();
-    console.log(`Downloading ${PACKAGE_NAME} v${version}...`);
+    console.error(`Downloading ${PACKAGE_NAME} v${version}...`);
 
     const release = await withRetry(() => getReleaseByTag(version));
     const asset = release.assets.find((a) => a.name === assetName);
@@ -463,7 +475,7 @@ async function downloadAndExtract(cacheDir) {
     );
 
     // Extract to temporary directory
-    console.log("Extracting...");
+    console.error("Extracting...");
     fs.mkdirSync(tempExtractDir, { recursive: true });
 
     if (assetName.endsWith(".zip")) {
@@ -492,7 +504,7 @@ async function downloadAndExtract(cacheDir) {
     fs.unlinkSync(tempArchive);
     fs.rmSync(tempExtractDir, { recursive: true, force: true });
 
-    console.log(`Installed ${PACKAGE_NAME} to ${binaryPath}`);
+    console.error(`Installed ${PACKAGE_NAME} to ${binaryPath}`);
     return binaryPath;
   } catch (error) {
     console.error(`Failed to download ${PACKAGE_NAME}: ${error.message}`);

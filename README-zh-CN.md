@@ -27,6 +27,21 @@ ace-tool-rs 是一个 Rust 实现的代码库上下文引擎，使 AI 助手能�
 
 ## 安装
 
+### 快速开始（推荐）
+
+使用 npx 是安装和运行 ace-tool-rs 最简单的方式：
+
+```bash
+npx ace-tool-rs --base-url <API_URL> --token <AUTH_TOKEN>
+```
+
+这会自动下载适合你平台的二进制文件并运行。
+
+**支持的平台：**
+- Windows (x64)
+- macOS (x64, ARM64)
+- Linux (x64, ARM64)
+
 ### 从源码构建
 
 ```bash
@@ -64,6 +79,7 @@ ace-tool-rs --base-url <API_URL> --token <AUTH_TOKEN>
 | `--upload-timeout` | 覆盖上传超时时间（秒），禁用自适应超时 |
 | `--upload-concurrency` | 覆盖上传并发度，禁用自适应并发 |
 | `--no-adaptive` | 禁用自适应策略，使用静态启发式值 |
+| `--no-webbrowser-enhance-prompt` | 禁用 enhance_prompt 的浏览器交互，直接返回 API 结果 |
 | `--index-only` | 仅索引当前目录并退出（不启动 MCP 服务器） |
 | `--enhance-prompt` | 增强提示词并输出到标准输出，然后退出 |
 | `--max-lines-per-blob` | 每个 blob 块的最大行数（默认：800） |
@@ -74,6 +90,7 @@ ace-tool-rs --base-url <API_URL> --token <AUTH_TOKEN>
 | 变量 | 描述 |
 |------|------|
 | `RUST_LOG` | 设置日志级别（如 `info`、`debug`、`warn`） |
+| `PROMPT_ENHANCER` | 控制 `enhance_prompt` 工具的暴露：设置为 `disabled`、`false`、`0` 或 `off` 可隐藏并禁用该工具 |
 | `ACE_ENHANCER_ENDPOINT` | 端点选择：`new`（默认）、`old`、`claude`、`openai` 或 `gemini` |
 | `PROMPT_ENHANCER_BASE_URL` | 第三方 API 的基础 URL（`claude`/`openai`/`gemini` 必需） |
 | `PROMPT_ENHANCER_TOKEN` | 第三方 API 的密钥（`claude`/`openai`/`gemini` 必需） |
@@ -103,8 +120,8 @@ ace-tool-rs --base-url https://api.example.com --token your-token-here --transpo
 
 ```toml
 [mcp_servers.ace-tool]
-command = "/path/to/ace-tool-rs"
-args = ["--base-url", "https://api.example.com", "--token", "your-token-here", "--transport", "lsp"]
+command = "npx"
+args = ["ace-tool-rs", "--base-url", "https://api.example.com", "--token", "your-token-here", "--transport", "lsp"]
 env = { RUST_LOG = "info" }
 startup_timeout_ms = 60000
 ```
@@ -120,8 +137,9 @@ startup_timeout_ms = 60000
 {
   "mcpServers": {
     "ace-tool": {
-      "command": "/path/to/ace-tool-rs",
+      "command": "npx",
       "args": [
+        "ace-tool-rs",
         "--base-url", "https://api.example.com",
         "--token", "your-token-here"
       ]
@@ -135,7 +153,7 @@ startup_timeout_ms = 60000
 运行以下命令：
 
 ```bash
-claude mcp add-json ace-tool --scope user '{"type":"stdio","command":"/path/to/ace-tool-rs","args":["--base-url",  "https://api.example.com/",  "--token", "your-token-here"],"env":{}}'
+claude mcp add-json ace-tool --scope user '{"type":"stdio","command":"npx","args":["ace-tool-rs","--base-url","https://api.example.com/","--token","your-token-here"],"env":{}}'
 ```
 
 修改 `~/.claude/settings.json` 添加工具权限：
@@ -434,3 +452,7 @@ cargo clippy
 3. 提交你的更改（`git commit -m 'Add some amazing feature'`）
 4. 推送到分支（`git push origin feature/amazing-feature`）
 5. 开启 Pull Request
+
+## Star 历史
+
+[![Star History Chart](https://starchart.cc/missdeer/ace-tool-rs.svg)](https://starchart.cc/missdeer/ace-tool-rs)
