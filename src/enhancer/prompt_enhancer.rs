@@ -1,12 +1,13 @@
 //! Prompt Enhancer - Core enhancement logic
 //! Based on Augment VSCode plugin implementation
 //!
-//! Supports multiple API endpoints controlled by environment variable `ACE_ENHANCER_ENDPOINT`:
-//! - `new`: Uses Augment /prompt-enhancer endpoint (default)
+//! Endpoint selection is controlled by environment variable `ACE_ENHANCER_ENDPOINT`:
+//! - `local` or *unset*: Pass through original prompt unchanged (no network call)
+//! - `new`: Uses Augment /prompt-enhancer endpoint
 //! - `old`: Uses Augment /chat-stream endpoint
-//! - `claude`: Uses Claude API (Anthropic)
-//! - `openai`: Uses OpenAI API
-//! - `gemini`: Uses Gemini API (Google)
+//! - `claude` / `openai` / `gemini`: Use respective third-party APIs
+//! - `auto`: Auto-detect provider via standard API key env vars
+//!   (see [`detect_auto_endpoint`])
 
 use std::path::Path;
 use std::sync::Arc;
@@ -19,7 +20,8 @@ use tracing::{error, info, warn};
 use crate::config::Config;
 use crate::service::{
     call_claude_endpoint, call_gemini_endpoint, call_new_endpoint, call_old_endpoint,
-    call_openai_endpoint, get_third_party_config, EnhancerEndpoint,
+    call_openai_endpoint, has_nonempty_env, provider_defaults, read_nonempty_env,
+    resolve_third_party_config, EnhancerEndpoint,
 };
 use crate::utils::project_detector::get_index_file_path;
 
@@ -28,11 +30,111 @@ use super::server::EnhancerServer;
 /// Environment variable to control which endpoint to use
 pub const ENV_ENHANCER_ENDPOINT: &str = "ACE_ENHANCER_ENDPOINT";
 
-/// Get the configured enhancer endpoint type
-pub fn get_enhancer_endpoint() -> EnhancerEndpoint {
-    std::env::var(ENV_ENHANCER_ENDPOINT)
-        .map(|v| EnhancerEndpoint::from_env_str(&v))
-        .unwrap_or(EnhancerEndpoint::Old) // Changed from New to Old to avoid API风控
+/// Optional user-preferred provider when `ACE_ENHANCER_ENDPOINT=auto`
+pub const ENV_ENHANCER_PREFERRED_PROVIDER: &str = "ACE_ENHANCER_PREFERRED_PROVIDER";
+
+/// Result of resolving the active enhancer endpoint, with a human-readable
+/// `source` string explaining how the choice was made (for observability).
+///
+/// See ADR-7 in `docs/prompt_enhancer_redesign_plan_v2.md`.
+#[derive(Debug, Clone)]
+pub struct EndpointDecision {
+    pub endpoint: EnhancerEndpoint,
+    pub source: String,
+}
+
+/// Resolve the currently active enhancer endpoint based on environment variables.
+///
+/// - Unset / empty `ACE_ENHANCER_ENDPOINT` → [`EnhancerEndpoint::Local`] (no network)
+/// - `auto` → see [`detect_auto_endpoint`]
+/// - Any other value → strict parse via [`EnhancerEndpoint::try_from_env_str`]
+///   (returns `Err` for unknown values — fail-fast per ADR-6)
+pub fn get_enhancer_endpoint() -> Result<EndpointDecision> {
+    let raw = read_nonempty_env(ENV_ENHANCER_ENDPOINT);
+
+    match raw.as_deref().map(str::to_lowercase).as_deref() {
+        None => Ok(EndpointDecision {
+            endpoint: EnhancerEndpoint::Local,
+            source: format!(
+                "{} not set, defaulting to Local (no network)",
+                ENV_ENHANCER_ENDPOINT
+            ),
+        }),
+        Some("auto") => detect_auto_endpoint(),
+        Some(other) => {
+            let endpoint = EnhancerEndpoint::try_from_env_str(other)?;
+            Ok(EndpointDecision {
+                endpoint,
+                source: format!("{}={}", ENV_ENHANCER_ENDPOINT, other),
+            })
+        }
+    }
+}
+
+/// Auto-detection logic for `ACE_ENHANCER_ENDPOINT=auto`.
+///
+/// Priority:
+/// 1. If `ACE_ENHANCER_PREFERRED_PROVIDER` is set, use it (and require
+///    its standard env key to be non-empty, else error).
+/// 2. Otherwise scan `ANTHROPIC_API_KEY` > `GEMINI_API_KEY` > `OPENAI_API_KEY`
+///    and pick the first non-empty one.
+/// 3. If no key is found, fall back to Local with a WARN log
+///    (so users get a clear hint instead of silent template fallback).
+fn detect_auto_endpoint() -> Result<EndpointDecision> {
+    // Priority 1: explicit preferred provider
+    if let Some(preferred) = read_nonempty_env(ENV_ENHANCER_PREFERRED_PROVIDER) {
+        let endpoint = EnhancerEndpoint::try_from_env_str(&preferred)
+            .map_err(|e| anyhow!("{}={}: {}", ENV_ENHANCER_PREFERRED_PROVIDER, preferred, e))?;
+        let (key_env, _, _) = provider_defaults(endpoint).ok_or_else(|| {
+            anyhow!(
+                "{}={} but '{}' has no auto-detect support (not a third-party provider)",
+                ENV_ENHANCER_PREFERRED_PROVIDER,
+                preferred,
+                endpoint
+            )
+        })?;
+        if !has_nonempty_env(key_env) {
+            return Err(anyhow!(
+                "{}={} specified, but {} is not set or empty",
+                ENV_ENHANCER_PREFERRED_PROVIDER,
+                preferred,
+                key_env
+            ));
+        }
+        return Ok(EndpointDecision {
+            endpoint,
+            source: format!(
+                "auto + {}={} + {} present",
+                ENV_ENHANCER_PREFERRED_PROVIDER, preferred, key_env
+            ),
+        });
+    }
+
+    // Priority 2: deterministic scan order
+    let candidates = [
+        (EnhancerEndpoint::Claude, "ANTHROPIC_API_KEY"),
+        (EnhancerEndpoint::Gemini, "GEMINI_API_KEY"),
+        (EnhancerEndpoint::OpenAI, "OPENAI_API_KEY"),
+    ];
+    for (ep, key) in candidates {
+        if has_nonempty_env(key) {
+            return Ok(EndpointDecision {
+                endpoint: ep,
+                source: format!("auto -> {} (first non-empty key)", key),
+            });
+        }
+    }
+
+    // Priority 3: fallback to Local with warning
+    warn!(
+        "ACE_ENHANCER_ENDPOINT=auto but no provider API key found. \
+         Set ANTHROPIC_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY to enable. \
+         Falling back to Local (will return original prompt unchanged)."
+    );
+    Ok(EndpointDecision {
+        endpoint: EnhancerEndpoint::Local,
+        source: "auto -> no provider keys found, fallback to Local".to_string(),
+    })
 }
 
 /// Prompt Enhancer
@@ -263,15 +365,33 @@ async fn call_prompt_enhancer_api_static(
     conversation_history: &str,
     blob_names: &[String],
 ) -> Result<String> {
-    let endpoint = get_enhancer_endpoint();
+    let decision = get_enhancer_endpoint()?;
+    info!(
+        endpoint = %decision.endpoint,
+        source = %decision.source,
+        "Prompt enhancer endpoint resolved"
+    );
 
-    match endpoint {
+    match decision.endpoint {
+        EnhancerEndpoint::Local => {
+            // ADR-2: Local mode no longer renders the meta-template.
+            // The template (with its "⚠️ NO TOOLS ALLOWED ⚠️" banner) is
+            // an instruction-for-an-LLM, not a result-for-the-MCP-client.
+            // Returning the original prompt unchanged is the correct
+            // graceful-degradation behavior.
+            warn!(
+                "Using LOCAL mode: returning original prompt unchanged. \
+                 To enable enhancement, set ACE_ENHANCER_ENDPOINT=auto \
+                 (with API key inheritance) or ACE_ENHANCER_ENDPOINT=claude/gemini/openai."
+            );
+            Ok(original_prompt.to_string())
+        }
         EnhancerEndpoint::New => {
-            info!("Using NEW prompt-enhancer endpoint");
+            info!("Using NEW prompt-enhancer endpoint (Augment)");
             call_new_endpoint(client, config, original_prompt, conversation_history).await
         }
         EnhancerEndpoint::Old => {
-            info!("Using OLD chat-stream endpoint");
+            info!("Using OLD chat-stream endpoint (Augment)");
             call_old_endpoint(
                 client,
                 config,
@@ -281,38 +401,45 @@ async fn call_prompt_enhancer_api_static(
             )
             .await
         }
-        EnhancerEndpoint::Claude => {
-            info!("Using Claude API endpoint");
-            let third_party_config = get_third_party_config(endpoint)?;
-            call_claude_endpoint(
-                client,
-                &third_party_config,
-                original_prompt,
-                conversation_history,
-            )
-            .await
-        }
-        EnhancerEndpoint::OpenAI => {
-            info!("Using OpenAI API endpoint");
-            let third_party_config = get_third_party_config(endpoint)?;
-            call_openai_endpoint(
-                client,
-                &third_party_config,
-                original_prompt,
-                conversation_history,
-            )
-            .await
-        }
-        EnhancerEndpoint::Gemini => {
-            info!("Using Gemini API endpoint");
-            let third_party_config = get_third_party_config(endpoint)?;
-            call_gemini_endpoint(
-                client,
-                &third_party_config,
-                original_prompt,
-                conversation_history,
-            )
-            .await
+        EnhancerEndpoint::Claude | EnhancerEndpoint::OpenAI | EnhancerEndpoint::Gemini => {
+            let resolved = resolve_third_party_config(decision.endpoint)?;
+            info!(
+                endpoint = %decision.endpoint,
+                token_source = resolved.token_source,
+                base_url_source = %resolved.base_url_source,
+                model_source = %resolved.model_source,
+                "Third-party config resolved"
+            );
+            match decision.endpoint {
+                EnhancerEndpoint::Claude => {
+                    call_claude_endpoint(
+                        client,
+                        &resolved.config,
+                        original_prompt,
+                        conversation_history,
+                    )
+                    .await
+                }
+                EnhancerEndpoint::OpenAI => {
+                    call_openai_endpoint(
+                        client,
+                        &resolved.config,
+                        original_prompt,
+                        conversation_history,
+                    )
+                    .await
+                }
+                EnhancerEndpoint::Gemini => {
+                    call_gemini_endpoint(
+                        client,
+                        &resolved.config,
+                        original_prompt,
+                        conversation_history,
+                    )
+                    .await
+                }
+                _ => unreachable!("guarded by outer match arm"),
+            }
         }
     }
 }

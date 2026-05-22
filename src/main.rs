@@ -143,7 +143,9 @@ async fn main() -> Result<()> {
         info!("Project root: {:?}", project_root);
 
         // Check if using third-party endpoint (claude/openai/gemini)
-        let endpoint = get_enhancer_endpoint();
+        let decision = get_enhancer_endpoint()?;
+        let endpoint = decision.endpoint;
+        info!(endpoint = %endpoint, source = %decision.source, "Endpoint resolved");
         let config = if endpoint.is_third_party() {
             // For third-party endpoints, base_url and token are not required from CLI
             // They will be read from environment variables

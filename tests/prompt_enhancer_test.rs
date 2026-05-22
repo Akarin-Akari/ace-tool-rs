@@ -486,44 +486,82 @@ fn test_get_enhancer_endpoint_all_cases() {
 
     let original_value = std::env::var(ENV_ENHANCER_ENDPOINT).ok();
 
-    // Test default
+    // Default (unset) → Local (per v2 plan ADR-1: no implicit network calls)
     std::env::remove_var(ENV_ENHANCER_ENDPOINT);
-    assert_eq!(get_enhancer_endpoint(), EnhancerEndpoint::New);
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::Local
+    );
 
-    // Test each endpoint type
+    // Each explicit endpoint value
+    std::env::set_var(ENV_ENHANCER_ENDPOINT, "local");
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::Local
+    );
+
     std::env::set_var(ENV_ENHANCER_ENDPOINT, "old");
-    assert_eq!(get_enhancer_endpoint(), EnhancerEndpoint::Old);
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::Old
+    );
 
     std::env::set_var(ENV_ENHANCER_ENDPOINT, "new");
-    assert_eq!(get_enhancer_endpoint(), EnhancerEndpoint::New);
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::New
+    );
 
     std::env::set_var(ENV_ENHANCER_ENDPOINT, "claude");
-    assert_eq!(get_enhancer_endpoint(), EnhancerEndpoint::Claude);
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::Claude
+    );
 
     std::env::set_var(ENV_ENHANCER_ENDPOINT, "openai");
-    assert_eq!(get_enhancer_endpoint(), EnhancerEndpoint::OpenAI);
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::OpenAI
+    );
 
     std::env::set_var(ENV_ENHANCER_ENDPOINT, "gemini");
-    assert_eq!(get_enhancer_endpoint(), EnhancerEndpoint::Gemini);
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::Gemini
+    );
 
-    // Edge cases
     // Case insensitive
     std::env::set_var(ENV_ENHANCER_ENDPOINT, "OLD");
-    assert_eq!(get_enhancer_endpoint(), EnhancerEndpoint::Old);
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::Old
+    );
     std::env::set_var(ENV_ENHANCER_ENDPOINT, "Old");
-    assert_eq!(get_enhancer_endpoint(), EnhancerEndpoint::Old);
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::Old
+    );
 
     // Whitespace
     std::env::set_var(ENV_ENHANCER_ENDPOINT, "  old  ");
-    assert_eq!(get_enhancer_endpoint(), EnhancerEndpoint::Old);
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::Old
+    );
 
-    // Invalid value -> Default (New)
+    // ADR-6: invalid value → fail-fast Err
     std::env::set_var(ENV_ENHANCER_ENDPOINT, "invalid");
-    assert_eq!(get_enhancer_endpoint(), EnhancerEndpoint::New);
+    assert!(
+        get_enhancer_endpoint().is_err(),
+        "Unknown endpoint must error, not silently fall back"
+    );
 
-    // Empty string -> Default (New)
+    // Empty string → treated as unset → Local
     std::env::set_var(ENV_ENHANCER_ENDPOINT, "");
-    assert_eq!(get_enhancer_endpoint(), EnhancerEndpoint::New);
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::Local
+    );
 
     // Restore original value
     match original_value {
@@ -660,76 +698,111 @@ fn test_parse_streaming_response_empty_text() {
 // ========================================================================
 
 #[test]
-fn test_enhancer_endpoint_from_env_str() {
-    assert_eq!(EnhancerEndpoint::from_env_str("old"), EnhancerEndpoint::Old);
-    assert_eq!(EnhancerEndpoint::from_env_str("OLD"), EnhancerEndpoint::Old);
-    assert_eq!(EnhancerEndpoint::from_env_str("Old"), EnhancerEndpoint::Old);
-    assert_eq!(EnhancerEndpoint::from_env_str("new"), EnhancerEndpoint::New);
-    assert_eq!(EnhancerEndpoint::from_env_str("NEW"), EnhancerEndpoint::New);
+fn test_enhancer_endpoint_try_from_env_str() {
     assert_eq!(
-        EnhancerEndpoint::from_env_str("claude"),
+        EnhancerEndpoint::try_from_env_str("local").unwrap(),
+        EnhancerEndpoint::Local
+    );
+    assert_eq!(
+        EnhancerEndpoint::try_from_env_str("LOCAL").unwrap(),
+        EnhancerEndpoint::Local
+    );
+    assert_eq!(
+        EnhancerEndpoint::try_from_env_str("old").unwrap(),
+        EnhancerEndpoint::Old
+    );
+    assert_eq!(
+        EnhancerEndpoint::try_from_env_str("OLD").unwrap(),
+        EnhancerEndpoint::Old
+    );
+    assert_eq!(
+        EnhancerEndpoint::try_from_env_str("Old").unwrap(),
+        EnhancerEndpoint::Old
+    );
+    assert_eq!(
+        EnhancerEndpoint::try_from_env_str("new").unwrap(),
+        EnhancerEndpoint::New
+    );
+    assert_eq!(
+        EnhancerEndpoint::try_from_env_str("NEW").unwrap(),
+        EnhancerEndpoint::New
+    );
+    assert_eq!(
+        EnhancerEndpoint::try_from_env_str("claude").unwrap(),
         EnhancerEndpoint::Claude
     );
     assert_eq!(
-        EnhancerEndpoint::from_env_str("CLAUDE"),
+        EnhancerEndpoint::try_from_env_str("CLAUDE").unwrap(),
         EnhancerEndpoint::Claude
     );
     assert_eq!(
-        EnhancerEndpoint::from_env_str("Claude"),
+        EnhancerEndpoint::try_from_env_str("Claude").unwrap(),
         EnhancerEndpoint::Claude
     );
     assert_eq!(
-        EnhancerEndpoint::from_env_str("openai"),
+        EnhancerEndpoint::try_from_env_str("openai").unwrap(),
         EnhancerEndpoint::OpenAI
     );
     assert_eq!(
-        EnhancerEndpoint::from_env_str("OPENAI"),
+        EnhancerEndpoint::try_from_env_str("OPENAI").unwrap(),
         EnhancerEndpoint::OpenAI
     );
     assert_eq!(
-        EnhancerEndpoint::from_env_str("OpenAI"),
+        EnhancerEndpoint::try_from_env_str("OpenAI").unwrap(),
         EnhancerEndpoint::OpenAI
     );
     assert_eq!(
-        EnhancerEndpoint::from_env_str("gemini"),
+        EnhancerEndpoint::try_from_env_str("gemini").unwrap(),
         EnhancerEndpoint::Gemini
     );
     assert_eq!(
-        EnhancerEndpoint::from_env_str("GEMINI"),
+        EnhancerEndpoint::try_from_env_str("GEMINI").unwrap(),
         EnhancerEndpoint::Gemini
     );
     assert_eq!(
-        EnhancerEndpoint::from_env_str("Gemini"),
+        EnhancerEndpoint::try_from_env_str("Gemini").unwrap(),
         EnhancerEndpoint::Gemini
     );
 }
 
 #[test]
-fn test_enhancer_endpoint_from_env_str_with_whitespace() {
+fn test_enhancer_endpoint_try_from_env_str_with_whitespace() {
     assert_eq!(
-        EnhancerEndpoint::from_env_str("  claude  "),
+        EnhancerEndpoint::try_from_env_str("  claude  ").unwrap(),
         EnhancerEndpoint::Claude
     );
     assert_eq!(
-        EnhancerEndpoint::from_env_str("\topenai\n"),
+        EnhancerEndpoint::try_from_env_str("\topenai\n").unwrap(),
         EnhancerEndpoint::OpenAI
     );
     assert_eq!(
-        EnhancerEndpoint::from_env_str(" gemini "),
+        EnhancerEndpoint::try_from_env_str(" gemini ").unwrap(),
         EnhancerEndpoint::Gemini
     );
 }
 
 #[test]
-fn test_enhancer_endpoint_from_env_str_unknown() {
+fn test_enhancer_endpoint_try_from_env_str_unknown_errors() {
+    // ADR-6: unknown values fail-fast instead of silently degrading to Local
+    assert!(EnhancerEndpoint::try_from_env_str("unknown").is_err());
+    assert!(EnhancerEndpoint::try_from_env_str("").is_err());
+    assert!(EnhancerEndpoint::try_from_env_str("invalid").is_err());
+    assert!(EnhancerEndpoint::try_from_env_str("anthropic").is_err()); // common typo
+    // 'auto' is a meta value handled at the route layer, not a direct variant
+    assert!(EnhancerEndpoint::try_from_env_str("auto").is_err());
+}
+
+#[test]
+#[allow(deprecated)]
+fn test_enhancer_endpoint_legacy_from_env_str_falls_back_to_local() {
+    // The deprecated infallible API still works; unknown values silently become Local
     assert_eq!(
         EnhancerEndpoint::from_env_str("unknown"),
-        EnhancerEndpoint::New
+        EnhancerEndpoint::Local
     );
-    assert_eq!(EnhancerEndpoint::from_env_str(""), EnhancerEndpoint::New);
     assert_eq!(
-        EnhancerEndpoint::from_env_str("invalid"),
-        EnhancerEndpoint::New
+        EnhancerEndpoint::from_env_str(""),
+        EnhancerEndpoint::Local
     );
 }
 
@@ -747,21 +820,25 @@ fn test_enhancer_endpoint_is_third_party() {
 // ========================================================================
 
 #[test]
-fn test_get_third_party_config_missing_base_url() {
+fn test_get_third_party_config_falls_back_when_base_url_missing() {
+    // ADR-5: PROMPT_ENHANCER_BASE_URL is now optional. When missing,
+    // resolution falls back to the provider-standard env var (e.g.
+    // ANTHROPIC_BASE_URL) and then to a hardcoded default — it no
+    // longer errors.
     let _guard = ENV_MUTEX.lock().unwrap();
 
     let orig_url = std::env::var(ENV_ENHANCER_BASE_URL).ok();
     let orig_token = std::env::var(ENV_ENHANCER_TOKEN).ok();
+    let orig_anthropic_url = std::env::var("ANTHROPIC_BASE_URL").ok();
 
     std::env::remove_var(ENV_ENHANCER_BASE_URL);
+    std::env::remove_var("ANTHROPIC_BASE_URL");
     std::env::set_var(ENV_ENHANCER_TOKEN, "test-token");
 
-    let result = get_third_party_config(EnhancerEndpoint::Claude);
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("PROMPT_ENHANCER_BASE_URL"));
+    let config = get_third_party_config(EnhancerEndpoint::Claude)
+        .expect("missing PROMPT_ENHANCER_BASE_URL should fall back, not error");
+    assert_eq!(config.base_url, "https://api.anthropic.com");
+    assert_eq!(config.token, "test-token");
 
     // Restore
     match orig_url {
@@ -771,25 +848,35 @@ fn test_get_third_party_config_missing_base_url() {
     match orig_token {
         Some(v) => std::env::set_var(ENV_ENHANCER_TOKEN, v),
         None => std::env::remove_var(ENV_ENHANCER_TOKEN),
+    }
+    match orig_anthropic_url {
+        Some(v) => std::env::set_var("ANTHROPIC_BASE_URL", v),
+        None => std::env::remove_var("ANTHROPIC_BASE_URL"),
     }
 }
 
 #[test]
 fn test_get_third_party_config_missing_token() {
+    // ADR-5: PROMPT_ENHANCER_TOKEN can fall back to the provider-standard
+    // env (e.g. ANTHROPIC_API_KEY). When BOTH are absent, we error.
     let _guard = ENV_MUTEX.lock().unwrap();
 
     let orig_url = std::env::var(ENV_ENHANCER_BASE_URL).ok();
     let orig_token = std::env::var(ENV_ENHANCER_TOKEN).ok();
+    let orig_anthropic_key = std::env::var("ANTHROPIC_API_KEY").ok();
 
     std::env::set_var(ENV_ENHANCER_BASE_URL, "https://api.example.com");
     std::env::remove_var(ENV_ENHANCER_TOKEN);
+    std::env::remove_var("ANTHROPIC_API_KEY");
 
     let result = get_third_party_config(EnhancerEndpoint::Claude);
     assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("PROMPT_ENHANCER_TOKEN"));
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("PROMPT_ENHANCER_TOKEN") || err_msg.contains("ANTHROPIC_API_KEY"),
+        "Error message should mention one of the candidate envs, got: {}",
+        err_msg
+    );
 
     // Restore
     match orig_url {
@@ -799,6 +886,10 @@ fn test_get_third_party_config_missing_token() {
     match orig_token {
         Some(v) => std::env::set_var(ENV_ENHANCER_TOKEN, v),
         None => std::env::remove_var(ENV_ENHANCER_TOKEN),
+    }
+    match orig_anthropic_key {
+        Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
+        None => std::env::remove_var("ANTHROPIC_API_KEY"),
     }
 }
 

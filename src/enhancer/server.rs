@@ -72,7 +72,7 @@ pub struct EnhancerServer {
     sessions: Arc<RwLock<HashMap<String, SessionData>>>,
     responders: Arc<Mutex<HashMap<String, SessionResponder>>>,
     enhance_callback: Arc<RwLock<Option<EnhanceCallback>>>,
-    timeout_ms: u64,
+    pub timeout_ms: u64,
 }
 
 impl EnhancerServer {
@@ -433,7 +433,7 @@ async fn handle_request(
 }
 
 /// Add CORS headers (restricted to localhost only)
-fn cors_response(mut response: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
+pub fn cors_response(mut response: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
     let headers = response.headers_mut();
     headers.insert(
         "Access-Control-Allow-Origin",
@@ -451,7 +451,7 @@ fn cors_response(mut response: Response<Full<Bytes>>) -> Response<Full<Bytes>> {
 }
 
 /// Serve Web UI HTML
-fn serve_enhancer_ui() -> Response<Full<Bytes>> {
+pub fn serve_enhancer_ui() -> Response<Full<Bytes>> {
     info!("serve_enhancer_ui() called - serving HTML UI (size: {} bytes)", ENHANCER_UI_HTML.len());
     let response = Response::builder()
         .status(StatusCode::OK)
@@ -732,7 +732,7 @@ fn json_error_response(status: StatusCode, error: &str) -> Response<Full<Bytes>>
 }
 
 /// Create JSON response
-fn json_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
+pub fn json_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")

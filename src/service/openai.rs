@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use super::common::{
-    build_third_party_prompt, extract_enhanced_prompt, map_auth_error, parse_chat_history,
-    replace_tool_names, ThirdPartyConfig,
+    build_third_party_prompt, extract_enhanced_prompt, first_nonempty_text, map_auth_error,
+    parse_chat_history, replace_tool_names, ThirdPartyConfig,
 };
 
 /// OpenAI API request structure
@@ -109,11 +109,18 @@ pub async fn call_openai_endpoint(
             let api_response: OpenAIApiResponse = serde_json::from_str(&body_text)
                 .map_err(|e| anyhow!("Failed to parse OpenAI response: {} - {}", e, body_text))?;
 
-            let text = api_response
-                .choices
-                .first()
-                .and_then(|c| c.message.content.clone())
-                .ok_or_else(|| anyhow!("OpenAI API returned empty response"))?;
+            let text = first_nonempty_text(
+                api_response
+                    .choices
+                    .into_iter()
+                    .map(|c| c.message.content),
+            )
+            .ok_or_else(|| {
+                anyhow!(
+                    "OpenAI API returned no usable text. Body: {}",
+                    body_text
+                )
+            })?;
 
             let enhanced_text = extract_enhanced_prompt(&text).unwrap_or(text);
             let enhanced_text = replace_tool_names(&enhanced_text);

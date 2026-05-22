@@ -20,10 +20,49 @@ pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-4-5-20250929";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.2-codex";
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-3-flash-preview";
 
+// ====== Phase 1 Helpers (ADR-4, ADR-8) ======
+
+/// Read environment variable, treating empty/whitespace-only values as `None`
+///
+/// This is the canonical way to read env vars throughout the enhancer codebase.
+/// It addresses the well-known `std::env::var(...).is_ok()` trap where empty
+/// strings (`X=""`) still return `Ok`, which would otherwise short-circuit
+/// later fallback logic.
+pub fn read_nonempty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Returns `true` if the environment variable is set to a non-empty,
+/// non-whitespace value. See [`read_nonempty_env`] for details.
+pub fn has_nonempty_env(key: &str) -> bool {
+    read_nonempty_env(key).is_some()
+}
+
+/// Extract the first non-empty trimmed text from a sequence of optional strings.
+///
+/// Useful for parsing provider responses that may contain multiple
+/// candidates/choices/parts, where the "primary" one might be empty
+/// (e.g. Gemini safety blocks producing empty first candidate).
+pub fn first_nonempty_text<I>(parts: I) -> Option<String>
+where
+    I: IntoIterator<Item = Option<String>>,
+{
+    parts
+        .into_iter()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty())
+}
+
 /// Enhancer endpoint type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnhancerEndpoint {
-    /// Use Augment /prompt-enhancer endpoint (default)
+    /// Local mode: render template and return directly, no external API call (default)
+    Local,
+    /// Use Augment /prompt-enhancer endpoint
     New,
     /// Use Augment /chat-stream endpoint
     Old,
@@ -38,6 +77,7 @@ pub enum EnhancerEndpoint {
 impl std::fmt::Display for EnhancerEndpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Local => write!(f, "local"),
             Self::New => write!(f, "new"),
             Self::Old => write!(f, "old"),
             Self::Claude => write!(f, "claude"),
@@ -48,15 +88,44 @@ impl std::fmt::Display for EnhancerEndpoint {
 }
 
 impl EnhancerEndpoint {
-    /// Parse from environment variable string
-    pub fn from_env_str(s: &str) -> Self {
+    /// Parse from environment variable string (strict, fallible).
+    ///
+    /// Returns `Err` for unknown values, including `auto` (which is a meta
+    /// value handled at the route layer in `get_enhancer_endpoint`, not a
+    /// direct variant). This is the recommended parser; prefer it over the
+    /// deprecated infallible [`from_env_str`].
+    ///
+    /// See ADR-6 in `docs/prompt_enhancer_redesign_plan_v2.md`.
+    pub fn try_from_env_str(s: &str) -> Result<Self> {
         match s.trim().to_lowercase().as_str() {
-            "old" => Self::Old,
-            "claude" => Self::Claude,
-            "openai" => Self::OpenAI,
-            "gemini" => Self::Gemini,
-            _ => Self::New, // default
+            "local" => Ok(Self::Local),
+            "old" => Ok(Self::Old),
+            "new" => Ok(Self::New),
+            "claude" => Ok(Self::Claude),
+            "openai" => Ok(Self::OpenAI),
+            "gemini" => Ok(Self::Gemini),
+            "auto" => Err(anyhow!(
+                "'auto' is a meta value handled by get_enhancer_endpoint(), \
+                 not a valid EnhancerEndpoint variant"
+            )),
+            other => Err(anyhow!(
+                "Unsupported ACE_ENHANCER_ENDPOINT value: '{}'. \
+                 Valid options: local, claude, gemini, openai, old, new, auto",
+                other
+            )),
         }
+    }
+
+    /// Parse from environment variable string (infallible, legacy).
+    ///
+    /// Unknown values silently fall back to `Local`. This preserves
+    /// pre-v2 behavior for any caller that hasn't migrated yet.
+    #[deprecated(
+        since = "0.1.11",
+        note = "Unknown values silently degrade to Local; prefer `try_from_env_str` for fail-fast parsing."
+    )]
+    pub fn from_env_str(s: &str) -> Self {
+        Self::try_from_env_str(s).unwrap_or(Self::Local)
     }
 
     /// Check if this is a third-party API (Claude/OpenAI/Gemini)
@@ -73,68 +142,155 @@ pub struct ThirdPartyConfig {
     pub model: String,
 }
 
-/// Get third-party API configuration from environment variables
-pub fn get_third_party_config(endpoint: EnhancerEndpoint) -> Result<ThirdPartyConfig> {
-    let base_url = std::env::var(ENV_ENHANCER_BASE_URL).map_err(|_| {
-        anyhow!(
-            "{} environment variable is required for '{}' endpoint",
-            ENV_ENHANCER_BASE_URL,
-            endpoint
-        )
-    })?;
+// ====== Phase 1 Helpers: provider defaults (ADR-5) ======
 
-    let token = std::env::var(ENV_ENHANCER_TOKEN).map_err(|_| {
-        anyhow!(
-            "{} environment variable is required for '{}' endpoint",
-            ENV_ENHANCER_TOKEN,
-            endpoint
-        )
-    })?;
-
-    let base_url = base_url.trim();
-    if base_url.is_empty() {
-        return Err(anyhow!(
-            "{} environment variable is required for '{}' endpoint",
-            ENV_ENHANCER_BASE_URL,
-            endpoint
-        ));
+/// Provider-specific environment variable names and default base URL.
+///
+/// Returns `(api_key_env, base_url_env, default_base_url)` for the three
+/// third-party providers; returns `None` for Local/New/Old (which don't
+/// participate in the third-party config flow).
+pub fn provider_defaults(
+    endpoint: EnhancerEndpoint,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    match endpoint {
+        EnhancerEndpoint::Claude => Some((
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_BASE_URL",
+            "https://api.anthropic.com",
+        )),
+        EnhancerEndpoint::Gemini => Some((
+            "GEMINI_API_KEY",
+            "GEMINI_BASE_URL",
+            "https://generativelanguage.googleapis.com",
+        )),
+        EnhancerEndpoint::OpenAI => Some((
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "https://api.openai.com",
+        )),
+        _ => None,
     }
+}
 
-    let token = token.trim();
-    if token.is_empty() {
-        return Err(anyhow!(
-            "{} environment variable is required for '{}' endpoint",
-            ENV_ENHANCER_TOKEN,
-            endpoint
-        ));
-    }
-
-    let default_model = match endpoint {
+/// Hardcoded fallback model for a given provider.
+///
+/// This is the lowest-priority entry in the model fallback chain
+/// (PROMPT_ENHANCER_MODEL > ANTHROPIC_MODEL/GEMINI_MODEL/OPENAI_MODEL > this).
+pub fn default_model_for(endpoint: EnhancerEndpoint) -> &'static str {
+    match endpoint {
         EnhancerEndpoint::Claude => DEFAULT_CLAUDE_MODEL,
-        EnhancerEndpoint::OpenAI => DEFAULT_OPENAI_MODEL,
         EnhancerEndpoint::Gemini => DEFAULT_GEMINI_MODEL,
+        EnhancerEndpoint::OpenAI => DEFAULT_OPENAI_MODEL,
         _ => "claude-sonnet-4-5",
+    }
+}
+
+/// Third-party config bundled with provenance metadata for observability.
+///
+/// Each `*_source` field is a human-readable string describing where the
+/// corresponding value originated (e.g. `"PROMPT_ENHANCER_TOKEN"` or
+/// `"default (https://api.anthropic.com)"`). The actual values themselves
+/// (tokens, URLs) MUST NOT be logged — only the source labels.
+///
+/// See ADR-7 in `docs/prompt_enhancer_redesign_plan_v2.md`.
+#[derive(Debug, Clone)]
+pub struct ResolvedThirdPartyConfig {
+    pub config: ThirdPartyConfig,
+    pub token_source: &'static str,
+    pub base_url_source: String,
+    pub model_source: String,
+}
+
+/// Get third-party API configuration from environment variables.
+///
+/// Thin wrapper around [`resolve_third_party_config`] that discards
+/// provenance metadata. Prefer the resolved variant when you need to
+/// log where each value came from.
+pub fn get_third_party_config(endpoint: EnhancerEndpoint) -> Result<ThirdPartyConfig> {
+    Ok(resolve_third_party_config(endpoint)?.config)
+}
+
+/// Resolve third-party API configuration with provenance metadata.
+///
+/// Resolution order:
+/// - **Token**: `PROMPT_ENHANCER_TOKEN` > provider-standard env (e.g. `ANTHROPIC_API_KEY`)
+/// - **Base URL**: `PROMPT_ENHANCER_BASE_URL` > `ANTHROPIC_BASE_URL`/`GEMINI_BASE_URL`/`OPENAI_BASE_URL` > hardcoded default
+/// - **Model**: `PROMPT_ENHANCER_MODEL` > `ANTHROPIC_MODEL`/`GEMINI_MODEL`/`OPENAI_MODEL` > hardcoded default
+///
+/// All env reads go through [`read_nonempty_env`] so empty/whitespace
+/// values are treated as unset (ADR-4).
+///
+/// Returns `Err` for unsupported endpoints (Local/New/Old) or when no
+/// token can be found.
+pub fn resolve_third_party_config(
+    endpoint: EnhancerEndpoint,
+) -> Result<ResolvedThirdPartyConfig> {
+    let (api_key_env, base_url_env, default_base_url) = provider_defaults(endpoint)
+        .ok_or_else(|| {
+            anyhow!(
+                "Endpoint '{}' is not a third-party provider (Claude/Gemini/OpenAI)",
+                endpoint
+            )
+        })?;
+
+    // ---- Token resolution ----
+    let (token, token_source) = if let Some(t) = read_nonempty_env(ENV_ENHANCER_TOKEN) {
+        (t, ENV_ENHANCER_TOKEN)
+    } else if let Some(t) = read_nonempty_env(api_key_env) {
+        (t, api_key_env)
+    } else {
+        return Err(anyhow!(
+            "No API token available for '{}' endpoint. Set either {} (generic override) \
+             or {} (provider-standard env var).",
+            endpoint,
+            ENV_ENHANCER_TOKEN,
+            api_key_env
+        ));
     };
 
-    let model = match std::env::var(ENV_ENHANCER_MODEL) {
-        Ok(value) => {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                default_model.to_string()
-            } else {
-                trimmed.to_string()
-            }
-        }
-        Err(_) => default_model.to_string(),
+    // ---- Base URL resolution ----
+    let (base_url, base_url_source) = if let Some(u) = read_nonempty_env(ENV_ENHANCER_BASE_URL) {
+        (u, ENV_ENHANCER_BASE_URL.to_string())
+    } else if let Some(u) = read_nonempty_env(base_url_env) {
+        (u, base_url_env.to_string())
+    } else {
+        (
+            default_base_url.to_string(),
+            format!("default ({})", default_base_url),
+        )
     };
-
-    // Normalize base URL
     let base_url = base_url.trim_end_matches('/').to_string();
 
-    Ok(ThirdPartyConfig {
-        base_url,
-        token: token.to_string(),
-        model,
+    // ---- Model resolution ----
+    let provider_model_env = match endpoint {
+        EnhancerEndpoint::Claude => Some("ANTHROPIC_MODEL"),
+        EnhancerEndpoint::Gemini => Some("GEMINI_MODEL"),
+        EnhancerEndpoint::OpenAI => Some("OPENAI_MODEL"),
+        _ => None,
+    };
+    let (model, model_source) = if let Some(m) = read_nonempty_env(ENV_ENHANCER_MODEL) {
+        (m, ENV_ENHANCER_MODEL.to_string())
+    } else if let Some(env_name) = provider_model_env {
+        if let Some(m) = read_nonempty_env(env_name) {
+            (m, env_name.to_string())
+        } else {
+            let default = default_model_for(endpoint);
+            (default.to_string(), format!("default ({})", default))
+        }
+    } else {
+        let default = default_model_for(endpoint);
+        (default.to_string(), format!("default ({})", default))
+    };
+
+    Ok(ResolvedThirdPartyConfig {
+        config: ThirdPartyConfig {
+            base_url,
+            token,
+            model,
+        },
+        token_source,
+        base_url_source,
+        model_source,
     })
 }
 

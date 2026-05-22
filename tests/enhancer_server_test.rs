@@ -158,8 +158,9 @@ fn test_enhancer_server_default() {
 #[tokio::test]
 async fn test_enhancer_server_get_port_default() {
     let server = EnhancerServer::new();
-    let port = server.get_port().await;
-    assert_eq!(port, 3000);
+    // Port is None until start() is called and binds successfully
+    let port = server.get_port();
+    assert_eq!(port, None);
 }
 
 #[tokio::test]

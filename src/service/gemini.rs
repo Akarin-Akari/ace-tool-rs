@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use super::common::{
-    build_third_party_prompt, extract_enhanced_prompt, map_auth_error, parse_chat_history,
-    replace_tool_names, ThirdPartyConfig,
+    build_third_party_prompt, extract_enhanced_prompt, first_nonempty_text, map_auth_error,
+    parse_chat_history, replace_tool_names, ThirdPartyConfig,
 };
 
 /// Gemini API request structure
@@ -133,12 +133,18 @@ pub async fn call_gemini_endpoint(
             let api_response: GeminiApiResponse = serde_json::from_str(&body_text)
                 .map_err(|e| anyhow!("Failed to parse Gemini response: {} - {}", e, body_text))?;
 
-            let text = api_response
-                .candidates
-                .first()
-                .and_then(|c| c.content.parts.first())
-                .and_then(|p| p.text.clone())
-                .ok_or_else(|| anyhow!("Gemini API returned empty response"))?;
+            let text = first_nonempty_text(
+                api_response
+                    .candidates
+                    .into_iter()
+                    .flat_map(|c| c.content.parts.into_iter().map(|p| p.text)),
+            )
+            .ok_or_else(|| {
+                anyhow!(
+                    "Gemini API returned no usable text. Possible safety block or non-text response. Body: {}",
+                    body_text
+                )
+            })?;
 
             let enhanced_text = extract_enhanced_prompt(&text).unwrap_or(text);
             let enhanced_text = replace_tool_names(&enhanced_text);
