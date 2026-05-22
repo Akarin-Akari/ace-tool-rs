@@ -467,7 +467,7 @@ async fn test_openai_api_empty_choices() {
     let result = call_openai_endpoint(&client, &config, "Test prompt", "").await;
 
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("empty response"));
+    assert!(result.unwrap_err().to_string().contains("no usable text"));
 }
 
 #[tokio::test]
@@ -722,7 +722,7 @@ async fn test_gemini_api_empty_candidates() {
     let result = call_gemini_endpoint(&client, &config, "Test prompt", "").await;
 
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("empty response"));
+    assert!(result.unwrap_err().to_string().contains("no usable text"));
 }
 
 #[tokio::test]

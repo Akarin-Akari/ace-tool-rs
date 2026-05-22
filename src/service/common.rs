@@ -460,3 +460,75 @@ pub mod lazy_static {
     }
     pub use lazy_static;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ====================================================================
+    // first_nonempty_text — see ADR-8 in v2 plan §4.4
+    // ====================================================================
+
+    #[test]
+    fn first_nonempty_text_skips_none_and_empty() {
+        let parts = vec![
+            None,
+            Some(String::new()),
+            Some("  ".to_string()),
+            Some("real".to_string()),
+        ];
+        assert_eq!(first_nonempty_text(parts), Some("real".to_string()));
+    }
+
+    #[test]
+    fn first_nonempty_text_returns_none_when_all_empty() {
+        let parts: Vec<Option<String>> = vec![None, Some(String::new()), Some("   ".to_string())];
+        assert_eq!(first_nonempty_text(parts), None);
+    }
+
+    #[test]
+    fn first_nonempty_text_returns_none_for_empty_input() {
+        let parts: Vec<Option<String>> = vec![];
+        assert_eq!(first_nonempty_text(parts), None);
+    }
+
+    #[test]
+    fn first_nonempty_text_trims_whitespace() {
+        let parts = vec![Some("  hello  ".to_string())];
+        assert_eq!(first_nonempty_text(parts), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn first_nonempty_text_takes_first_non_empty() {
+        // First non-empty (after trim) wins, even if later parts are richer
+        let parts = vec![
+            Some("a".to_string()),
+            Some("longer payload".to_string()),
+        ];
+        assert_eq!(first_nonempty_text(parts), Some("a".to_string()));
+    }
+
+    #[test]
+    fn first_nonempty_text_handles_gemini_safety_block_pattern() {
+        // Realistic Gemini-style: first candidate empty (safety block),
+        // second candidate has the real text.
+        let parts = vec![
+            Some(String::new()),
+            Some("real answer".to_string()),
+        ];
+        assert_eq!(first_nonempty_text(parts), Some("real answer".to_string()));
+    }
+
+    // ====================================================================
+    // read_nonempty_env / has_nonempty_env — basic sanity coverage
+    // ====================================================================
+
+    #[test]
+    fn read_nonempty_env_returns_none_for_unset() {
+        // Use a key that is extremely unlikely to be set in any environment
+        let key = "ACE_TOOL_TEST_DEFINITELY_UNSET_KEY_X9Z7Q";
+        std::env::remove_var(key);
+        assert_eq!(read_nonempty_env(key), None);
+        assert!(!has_nonempty_env(key));
+    }
+}

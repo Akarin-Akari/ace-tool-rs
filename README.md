@@ -91,10 +91,66 @@ ace-tool-rs --base-url <API_URL> --token <AUTH_TOKEN>
 |----------|-------------|
 | `RUST_LOG` | Set log level (e.g., `info`, `debug`, `warn`) |
 | `PROMPT_ENHANCER` | Control `enhance_prompt` tool exposure: set to `disabled`, `false`, `0`, or `off` to hide and disable the tool |
-| `ACE_ENHANCER_ENDPOINT` | Endpoint selection: `new` (default), `old`, `claude`, `openai`, or `gemini` |
-| `PROMPT_ENHANCER_BASE_URL` | Base URL for third-party API (required for `claude`/`openai`/`gemini`) |
-| `PROMPT_ENHANCER_TOKEN` | API key for third-party API (required for `claude`/`openai`/`gemini`) |
-| `PROMPT_ENHANCER_MODEL` | Model name override for third-party API (optional) |
+| `ACE_ENHANCER_ENDPOINT` | Endpoint selection. Default: `local` (no network). Other values: `auto`, `new`, `old`, `claude`, `openai`, `gemini`. See [Endpoint Selection](#prompt-enhancer-endpoint-selection) below. |
+| `ACE_ENHANCER_PREFERRED_PROVIDER` | When `ACE_ENHANCER_ENDPOINT=auto`, force a specific provider (`claude` / `openai` / `gemini`) instead of the deterministic scan order |
+| `PROMPT_ENHANCER_BASE_URL` | Base URL override for third-party APIs (optional; falls back to provider defaults like `https://api.anthropic.com`) |
+| `PROMPT_ENHANCER_TOKEN` | API token override (optional; falls back to provider-standard keys like `ANTHROPIC_API_KEY`) |
+| `PROMPT_ENHANCER_MODEL` | Model name override (optional; falls back to per-provider sensible defaults) |
+| `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` | Provider-standard API keys. Used as fallback when `PROMPT_ENHANCER_TOKEN` is unset, and used by `auto` mode for provider detection |
+
+### Prompt Enhancer Endpoint Selection
+
+> **Behavioral change in v0.1.11+** — Previous versions defaulted to `new` (which calls the Augment cloud endpoint).
+> Starting with v0.1.11, the default is **`local`** (no network call, returns the original prompt unchanged) for safety
+> and predictability. If you relied on the implicit `new` default, set `ACE_ENHANCER_ENDPOINT=new` explicitly.
+
+The enhancer supports six endpoint modes plus an auto-detection mode:
+
+| Value | Behavior | Network? |
+|-------|----------|:--------:|
+| `local` *(default)* | Returns the original prompt unchanged. Use for testing or when you want the tool to be a no-op. | ❌ |
+| `new` | Augment cloud `/prompt-enhancer` endpoint. Requires `--base-url` and `--token`. | ✅ |
+| `old` | Augment cloud `/chat-stream` endpoint (legacy). | ✅ |
+| `claude` | Anthropic Claude API. Reads token from `PROMPT_ENHANCER_TOKEN` then `ANTHROPIC_API_KEY`. | ✅ |
+| `openai` | OpenAI API. Reads token from `PROMPT_ENHANCER_TOKEN` then `OPENAI_API_KEY`. | ✅ |
+| `gemini` | Google Gemini API. Reads token from `PROMPT_ENHANCER_TOKEN` then `GEMINI_API_KEY`. | ✅ |
+| `auto` | **Opt-in** auto-detection: scans `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `OPENAI_API_KEY` and picks the first one present. Falls back to `local` with a `WARN` log if none are set. | ✅ (only when a key is found) |
+
+**Auto-detection priority (`ACE_ENHANCER_ENDPOINT=auto`):**
+
+1. If `ACE_ENHANCER_PREFERRED_PROVIDER` is set (e.g. `openai`), use it. Errors out if the matching API key is missing.
+2. Otherwise, scan in order: Claude → Gemini → OpenAI. The first non-empty key wins.
+3. If no keys are present, fall back to `local` with a `WARN` log telling you what to set.
+
+**Migration examples:**
+
+```bash
+# Old behavior (calls Augment cloud by default):
+ace-tool-rs --base-url https://api.example.com --token YOUR_TOKEN
+#   → equivalent to ACE_ENHANCER_ENDPOINT=new from v0.1.11+
+
+# New default (no network call):
+ace-tool-rs
+#   → ACE_ENHANCER_ENDPOINT=local; enhance_prompt returns input unchanged
+
+# Use Claude with the standard ANTHROPIC_API_KEY env var:
+ANTHROPIC_API_KEY=sk-ant-... ACE_ENHANCER_ENDPOINT=claude ace-tool-rs
+
+# Auto-detect provider from whichever API key is present:
+ANTHROPIC_API_KEY=sk-ant-... ACE_ENHANCER_ENDPOINT=auto ace-tool-rs
+
+# Force a preferred provider even when multiple keys are present:
+ANTHROPIC_API_KEY=sk-ant-...  \
+  OPENAI_API_KEY=sk-...  \
+  ACE_ENHANCER_PREFERRED_PROVIDER=openai  \
+  ACE_ENHANCER_ENDPOINT=auto  \
+  ace-tool-rs
+```
+
+**Observability:** every enhancement call logs a structured `info!` entry with the resolved
+`endpoint`, `source` (how the choice was made), and per-field provenance (`token_source` /
+`base_url_source` / `model_source`) — **never the secret values themselves**. Tail `RUST_LOG=info`
+to confirm your configuration is being picked up.
 
 ### Example
 

@@ -5,6 +5,9 @@ pub mod prompt_enhancer;
 pub mod server;
 pub mod templates;
 
+#[cfg(test)]
+mod routing_tests;
+
 pub use prompt_enhancer::PromptEnhancer;
 pub use server::EnhancerServer;
 pub use templates::{ENHANCER_UI_HTML, ENHANCE_PROMPT_TEMPLATE};

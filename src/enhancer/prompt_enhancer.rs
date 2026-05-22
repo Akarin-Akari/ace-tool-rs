@@ -20,8 +20,8 @@ use tracing::{error, info, warn};
 use crate::config::Config;
 use crate::service::{
     call_claude_endpoint, call_gemini_endpoint, call_new_endpoint, call_old_endpoint,
-    call_openai_endpoint, has_nonempty_env, provider_defaults, read_nonempty_env,
-    resolve_third_party_config, EnhancerEndpoint,
+    call_openai_endpoint, provider_defaults, read_nonempty_env, resolve_third_party_config,
+    EnhancerEndpoint,
 };
 use crate::utils::project_detector::get_index_file_path;
 
@@ -45,12 +45,36 @@ pub struct EndpointDecision {
 
 /// Resolve the currently active enhancer endpoint based on environment variables.
 ///
+/// Thin wrapper around [`resolve_endpoint_with`] that uses the live process
+/// environment via [`read_nonempty_env`]. Tests should call
+/// [`resolve_endpoint_with`] directly with an injected env getter to avoid
+/// mutating `std::env` from concurrent threads.
+///
 /// - Unset / empty `ACE_ENHANCER_ENDPOINT` → [`EnhancerEndpoint::Local`] (no network)
-/// - `auto` → see [`detect_auto_endpoint`]
+/// - `auto` → see [`detect_auto_endpoint_with`]
 /// - Any other value → strict parse via [`EnhancerEndpoint::try_from_env_str`]
 ///   (returns `Err` for unknown values — fail-fast per ADR-6)
 pub fn get_enhancer_endpoint() -> Result<EndpointDecision> {
-    let raw = read_nonempty_env(ENV_ENHANCER_ENDPOINT);
+    resolve_endpoint_with(read_nonempty_env)
+}
+
+/// Pure-function variant of [`get_enhancer_endpoint`] that takes an injected
+/// env getter.
+///
+/// The getter contract: returns `Some(value)` for non-empty environment
+/// values, or `None` for unset/empty/whitespace-only values. This matches
+/// the production helper [`read_nonempty_env`].
+///
+/// Used by the routing tests (`src/enhancer/routing_tests.rs`) to drive
+/// the resolution logic with a fake `HashMap`-backed env without touching
+/// the real process environment.
+///
+/// See ADR-7 and §4.2 of `docs/prompt_enhancer_redesign_plan_v2.md`.
+pub fn resolve_endpoint_with<F>(env_get: F) -> Result<EndpointDecision>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let raw = env_get(ENV_ENHANCER_ENDPOINT);
 
     match raw.as_deref().map(str::to_lowercase).as_deref() {
         None => Ok(EndpointDecision {
@@ -60,7 +84,7 @@ pub fn get_enhancer_endpoint() -> Result<EndpointDecision> {
                 ENV_ENHANCER_ENDPOINT
             ),
         }),
-        Some("auto") => detect_auto_endpoint(),
+        Some("auto") => detect_auto_endpoint_with(&env_get),
         Some(other) => {
             let endpoint = EnhancerEndpoint::try_from_env_str(other)?;
             Ok(EndpointDecision {
@@ -80,9 +104,15 @@ pub fn get_enhancer_endpoint() -> Result<EndpointDecision> {
 ///    and pick the first non-empty one.
 /// 3. If no key is found, fall back to Local with a WARN log
 ///    (so users get a clear hint instead of silent template fallback).
-fn detect_auto_endpoint() -> Result<EndpointDecision> {
+///
+/// Takes `env_get` by reference so that callers can keep ownership of
+/// their closure (`resolve_endpoint_with` reuses it across branches).
+fn detect_auto_endpoint_with<F>(env_get: &F) -> Result<EndpointDecision>
+where
+    F: Fn(&str) -> Option<String>,
+{
     // Priority 1: explicit preferred provider
-    if let Some(preferred) = read_nonempty_env(ENV_ENHANCER_PREFERRED_PROVIDER) {
+    if let Some(preferred) = env_get(ENV_ENHANCER_PREFERRED_PROVIDER) {
         let endpoint = EnhancerEndpoint::try_from_env_str(&preferred)
             .map_err(|e| anyhow!("{}={}: {}", ENV_ENHANCER_PREFERRED_PROVIDER, preferred, e))?;
         let (key_env, _, _) = provider_defaults(endpoint).ok_or_else(|| {
@@ -93,7 +123,7 @@ fn detect_auto_endpoint() -> Result<EndpointDecision> {
                 endpoint
             )
         })?;
-        if !has_nonempty_env(key_env) {
+        if env_get(key_env).is_none() {
             return Err(anyhow!(
                 "{}={} specified, but {} is not set or empty",
                 ENV_ENHANCER_PREFERRED_PROVIDER,
@@ -117,7 +147,7 @@ fn detect_auto_endpoint() -> Result<EndpointDecision> {
         (EnhancerEndpoint::OpenAI, "OPENAI_API_KEY"),
     ];
     for (ep, key) in candidates {
-        if has_nonempty_env(key) {
+        if env_get(key).is_some() {
             return Ok(EndpointDecision {
                 endpoint: ep,
                 source: format!("auto -> {} (first non-empty key)", key),
