@@ -9,7 +9,6 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::http_logger::{self, HttpRequestLog, HttpResponseLog};
-use crate::USER_AGENT;
 
 use super::common::{
     is_chinese_text, parse_chat_history, render_enhance_prompt, replace_tool_names, ChatMessage,
@@ -147,7 +146,7 @@ pub async fn call_new_endpoint(
             url: url.clone(),
             headers: http_logger::extract_headers_from_builder(
                 "application/json",
-                USER_AGENT,
+                &config.user_agent,
                 &request_id,
                 get_session_id(),
                 REDACTED_TOKEN,
@@ -161,7 +160,7 @@ pub async fn call_new_endpoint(
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .header("User-Agent", USER_AGENT)
+        .header("User-Agent", &config.user_agent)
         .header("x-request-id", &request_id)
         .header("x-request-session-id", get_session_id())
         .header("Authorization", format!("Bearer {}", config.token))
@@ -273,7 +272,7 @@ pub async fn call_old_endpoint(
             url: url.clone(),
             headers: http_logger::extract_headers_from_builder(
                 "application/json",
-                USER_AGENT,
+                &config.user_agent,
                 &request_id,
                 get_session_id(),
                 REDACTED_TOKEN,
@@ -287,7 +286,7 @@ pub async fn call_old_endpoint(
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .header("User-Agent", USER_AGENT)
+        .header("User-Agent", &config.user_agent)
         .header("x-request-id", &request_id)
         .header("x-request-session-id", get_session_id())
         .header("Authorization", format!("Bearer {}", config.token))

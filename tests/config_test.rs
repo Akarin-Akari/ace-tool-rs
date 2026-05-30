@@ -77,6 +77,7 @@ fn test_config_with_custom_values() {
             no_webbrowser_enhance_prompt: true,
             force_xdg_open: false,
             webui_addr: None,
+            user_agent: None,
         },
     )
     .unwrap();
@@ -249,3 +250,24 @@ fn test_default_exclude_patterns_contains_common_dirs() {
     assert!(patterns.contains(&"__pycache__".to_string()));
     assert!(patterns.contains(&".ace-tool".to_string()));
 }
+
+#[test]
+fn test_config_user_agent_default() {
+    let config = test_config("https://api.example.com", "test-token").unwrap();
+    assert_eq!(config.user_agent, ace_tool::USER_AGENT);
+}
+
+#[test]
+fn test_config_user_agent_override() {
+    let config = Config::new(
+        "https://api.example.com".to_string(),
+        "test-token".to_string(),
+        ConfigOptions {
+            user_agent: Some("custom-ua/1.0".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(config.user_agent, "custom-ua/1.0");
+}
+

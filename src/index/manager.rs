@@ -25,7 +25,6 @@ use crate::http_logger::{self, HttpRequestLog, HttpResponseLog};
 use crate::strategy::{AdaptiveStrategy, ErrorType};
 use crate::utils::path_normalizer::{normalize_path, normalize_relative_path, RuntimeEnv};
 use crate::utils::project_detector::get_index_file_path;
-use crate::USER_AGENT;
 
 /// Maximum blob size in bytes (128KB, aligned with official augment.mjs)
 const MAX_BLOB_SIZE: usize = 128 * 1024;
@@ -198,6 +197,7 @@ pub struct IndexManager {
     retrieval_timeout_secs: u64,
     no_adaptive: bool,
     cli_overrides: crate::config::CliOverrides,
+    user_agent: String,
 }
 
 impl IndexManager {
@@ -244,6 +244,7 @@ impl IndexManager {
             retrieval_timeout_secs: config.retrieval_timeout_secs,
             no_adaptive: config.no_adaptive,
             cli_overrides: config.cli_overrides.clone(),
+            user_agent: config.user_agent.clone(),
         })
     }
 
@@ -711,7 +712,8 @@ impl IndexManager {
                           client: Client,
                           base_url: String,
                           token: String,
-                          project_root: PathBuf| {
+                          project_root: PathBuf,
+                          user_agent: String| {
             async move {
                 let result = Self::upload_batch_internal(
                     &client,
@@ -720,6 +722,7 @@ impl IndexManager {
                     &project_root,
                     &batch,
                     timeout_ms,
+                    &user_agent,
                 )
                 .await;
                 (index, result)
@@ -741,6 +744,7 @@ impl IndexManager {
                         self.base_url.clone(),
                         self.token.clone(),
                         self.project_root.clone(),
+                        self.user_agent.clone(),
                     ));
                 }
             }
@@ -770,6 +774,7 @@ impl IndexManager {
         project_root: &Path,
         blobs: &[Blob],
         timeout_ms: u64,
+        user_agent: &str,
     ) -> BatchUploadResult {
         let batch_size: usize = blobs.iter().map(|b| b.content.len() + b.path.len()).sum();
         if batch_size > MAX_BATCH_SIZE {
@@ -806,7 +811,7 @@ impl IndexManager {
                     url: url.clone(),
                     headers: http_logger::extract_headers_from_builder(
                         "application/json",
-                        USER_AGENT,
+                        user_agent,
                         &request_id,
                         get_session_id(),
                         token,
@@ -821,7 +826,7 @@ impl IndexManager {
                 .post(&url)
                 .timeout(Duration::from_millis(timeout_ms))
                 .header("Content-Type", "application/json")
-                .header("User-Agent", USER_AGENT)
+                .header("User-Agent", user_agent)
                 .header("x-request-id", &request_id)
                 .header("x-request-session-id", get_session_id())
                 .header("Authorization", format!("Bearer {}", token))
@@ -1300,7 +1305,7 @@ impl IndexManager {
                     url: url.clone(),
                     headers: http_logger::extract_headers_from_builder(
                         "application/json",
-                        USER_AGENT,
+                        &self.user_agent,
                         &request_id,
                         get_session_id(),
                         &self.token,
@@ -1316,7 +1321,7 @@ impl IndexManager {
                 .post(&url)
                 .timeout(Duration::from_secs(self.retrieval_timeout_secs))
                 .header("Content-Type", "application/json")
-                .header("User-Agent", USER_AGENT)
+                .header("User-Agent", &self.user_agent)
                 .header("x-request-id", &request_id)
                 .header("x-request-session-id", get_session_id())
                 .header("Authorization", format!("Bearer {}", self.token))

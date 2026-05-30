@@ -63,12 +63,16 @@ struct Args {
     #[arg(long, default_value = "false")]
     force_xdg_open: bool,
 
-    /// Bind address and port for the enhance_prompt Web UI server (e.g., "127.0.0.1:8754", "0.0.0.0:3456")
+    /// Custom bind address and port for the enhance_prompt Web UI server (e.g., "127.0.0.1:8754", "0.0.0.0:3456")
     /// If not specified, automatically selects an available port on 127.0.0.1.
     /// WARNING: Binding to 0.0.0.0 or a non-loopback address exposes the unauthenticated
     /// Web UI to the network. Only use this in trusted environments.
     #[arg(long)]
     webui_addr: Option<String>,
+
+    /// Custom User-Agent header value for API requests
+    #[arg(long, env = "ACE_USER_AGENT")]
+    user_agent: Option<String>,
 
     /// Index-only mode: index current directory and exit (no MCP server)
     #[arg(long, default_value = "false")]
@@ -180,6 +184,7 @@ async fn main() -> Result<()> {
                             no_webbrowser_enhance_prompt: args.no_webbrowser_enhance_prompt,
                             force_xdg_open: args.force_xdg_open,
                             webui_addr: args.webui_addr.clone(),
+                            user_agent: args.user_agent.clone(),
                         },
                     )?
                 }
@@ -212,6 +217,7 @@ async fn main() -> Result<()> {
                     no_webbrowser_enhance_prompt: args.no_webbrowser_enhance_prompt,
                     force_xdg_open: args.force_xdg_open,
                     webui_addr: args.webui_addr.clone(),
+                    user_agent: args.user_agent.clone(),
                 },
             )?
         };
@@ -245,6 +251,7 @@ async fn main() -> Result<()> {
             no_webbrowser_enhance_prompt: args.no_webbrowser_enhance_prompt,
             force_xdg_open: args.force_xdg_open,
             webui_addr: args.webui_addr,
+            user_agent: args.user_agent,
         },
     )?;
 

@@ -1,8 +1,8 @@
-use std::sync::Arc;
 use ace_tool::config::{Config, ConfigOptions};
 use ace_tool::tools::search_context::{SearchContextArgs, SearchContextTool};
 
 #[tokio::test]
+#[ignore]
 async fn test_real_search_context() {
     let token = "63d161ed58a6c90f774e9cb8b95d6041a984059e3800fffa50436dc4aa98e233".to_string();
     let base_url = "https://d6.api.augmentcode.com".to_string();
