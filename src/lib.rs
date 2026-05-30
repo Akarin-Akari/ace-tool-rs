@@ -10,11 +10,11 @@ pub mod strategy;
 pub mod tools;
 pub mod utils;
 
+/// User-Agent header value (matches augment.cli format: augment.cli/{version})
+/// This format is required to avoid 429 rate limiting from Augment API
+pub const USER_AGENT: &str = "augment.cli/0.1.2/mcp";
+
 // Re-export commonly used types
 pub use config::{get_upload_strategy, CliOverrides, Config, UploadStrategy};
 pub use enhancer::PromptEnhancer;
 pub use index::{Blob, IndexManager, IndexResult, IndexStats};
-
-/// User-Agent header value (matches augment.cli format: augment.cli/{version})
-/// This format is required to avoid 429 rate limiting from Augment API
-pub const USER_AGENT: &str = "augment.cli/0.17.0";

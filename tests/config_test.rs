@@ -75,6 +75,8 @@ fn test_config_with_custom_values() {
             retrieval_timeout: Some(120),
             no_adaptive: true,
             no_webbrowser_enhance_prompt: true,
+            force_xdg_open: false,
+            webui_addr: None,
         },
     )
     .unwrap();

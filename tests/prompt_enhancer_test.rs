@@ -1,12 +1,14 @@
 //! Tests for prompt_enhancer module
 
-use ace_tool::enhancer::prompt_enhancer::{get_enhancer_endpoint, ENV_ENHANCER_ENDPOINT};
+use ace_tool::enhancer::prompt_enhancer::{
+    get_enhancer_endpoint, ENV_ENHANCER_ENDPOINT, ENV_ENHANCER_ENDPOINT_LEGACY,
+};
 use ace_tool::service::{
     extract_enhanced_prompt, get_third_party_config, is_chinese_text, parse_chat_history,
     parse_streaming_response, render_enhance_prompt, replace_tool_names, ChatMessage,
-    EnhancerEndpoint, DEFAULT_CLAUDE_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_MODEL,
-    DEFAULT_OPENAI_MODEL, ENV_ENHANCER_BASE_URL, ENV_ENHANCER_MODEL, ENV_ENHANCER_TOKEN,
-    NODE_ID_NEW, NODE_ID_OLD,
+    EnhancerEndpoint, DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_GEMINI_MODEL,
+    DEFAULT_MODEL, DEFAULT_OPENAI_MODEL, ENV_ENHANCER_BASE_URL, ENV_ENHANCER_MODEL,
+    ENV_ENHANCER_TOKEN, NODE_ID_NEW, NODE_ID_OLD,
 };
 use std::sync::Mutex;
 
@@ -485,9 +487,10 @@ fn test_get_enhancer_endpoint_all_cases() {
     let _guard = ENV_MUTEX.lock().unwrap();
 
     let original_value = std::env::var(ENV_ENHANCER_ENDPOINT).ok();
-
-    // Default (unset) → Local (per v2 plan ADR-1: no implicit network calls)
+    let original_legacy = std::env::var(ENV_ENHANCER_ENDPOINT_LEGACY).ok();
+    // Test default (neither env var set)
     std::env::remove_var(ENV_ENHANCER_ENDPOINT);
+    std::env::remove_var(ENV_ENHANCER_ENDPOINT_LEGACY);
     assert_eq!(
         get_enhancer_endpoint().unwrap().endpoint,
         EnhancerEndpoint::Local
@@ -500,6 +503,7 @@ fn test_get_enhancer_endpoint_all_cases() {
         EnhancerEndpoint::Local
     );
 
+    // Test primary env var (PROMPT_ENHANCER_ENDPOINT)
     std::env::set_var(ENV_ENHANCER_ENDPOINT, "old");
     assert_eq!(
         get_enhancer_endpoint().unwrap().endpoint,
@@ -529,6 +533,30 @@ fn test_get_enhancer_endpoint_all_cases() {
         get_enhancer_endpoint().unwrap().endpoint,
         EnhancerEndpoint::Gemini
     );
+    std::env::remove_var(ENV_ENHANCER_ENDPOINT);
+
+    // Test legacy env var fallback (ACE_ENHANCER_ENDPOINT)
+    std::env::set_var(ENV_ENHANCER_ENDPOINT_LEGACY, "claude");
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::Claude
+    );
+
+    std::env::set_var(ENV_ENHANCER_ENDPOINT_LEGACY, "openai");
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::OpenAI
+    );
+
+    // Test primary takes priority over legacy
+    std::env::set_var(ENV_ENHANCER_ENDPOINT, "gemini");
+    std::env::set_var(ENV_ENHANCER_ENDPOINT_LEGACY, "claude");
+    assert_eq!(
+        get_enhancer_endpoint().unwrap().endpoint,
+        EnhancerEndpoint::Gemini
+    );
+    std::env::remove_var(ENV_ENHANCER_ENDPOINT);
+    std::env::remove_var(ENV_ENHANCER_ENDPOINT_LEGACY);
 
     // Case insensitive
     std::env::set_var(ENV_ENHANCER_ENDPOINT, "OLD");
@@ -563,10 +591,14 @@ fn test_get_enhancer_endpoint_all_cases() {
         EnhancerEndpoint::Local
     );
 
-    // Restore original value
+    // Restore original values
     match original_value {
         Some(v) => std::env::set_var(ENV_ENHANCER_ENDPOINT, v),
         None => std::env::remove_var(ENV_ENHANCER_ENDPOINT),
+    }
+    match original_legacy {
+        Some(v) => std::env::set_var(ENV_ENHANCER_ENDPOINT_LEGACY, v),
+        None => std::env::remove_var(ENV_ENHANCER_ENDPOINT_LEGACY),
     }
 }
 
@@ -600,7 +632,8 @@ fn test_default_model_constant() {
 
 #[test]
 fn test_env_enhancer_endpoint_constant() {
-    assert_eq!(ENV_ENHANCER_ENDPOINT, "ACE_ENHANCER_ENDPOINT");
+    assert_eq!(ENV_ENHANCER_ENDPOINT, "PROMPT_ENHANCER_ENDPOINT");
+    assert_eq!(ENV_ENHANCER_ENDPOINT_LEGACY, "ACE_ENHANCER_ENDPOINT");
 }
 
 // ========================================================================
@@ -970,7 +1003,8 @@ fn test_get_third_party_config_custom_model() {
 
 #[test]
 fn test_env_var_constants() {
-    assert_eq!(ENV_ENHANCER_ENDPOINT, "ACE_ENHANCER_ENDPOINT");
+    assert_eq!(ENV_ENHANCER_ENDPOINT, "PROMPT_ENHANCER_ENDPOINT");
+    assert_eq!(ENV_ENHANCER_ENDPOINT_LEGACY, "ACE_ENHANCER_ENDPOINT");
     assert_eq!(ENV_ENHANCER_BASE_URL, "PROMPT_ENHANCER_BASE_URL");
     assert_eq!(ENV_ENHANCER_TOKEN, "PROMPT_ENHANCER_TOKEN");
     assert_eq!(ENV_ENHANCER_MODEL, "PROMPT_ENHANCER_MODEL");
@@ -978,7 +1012,8 @@ fn test_env_var_constants() {
 
 #[test]
 fn test_default_model_constants() {
-    assert_eq!(DEFAULT_CLAUDE_MODEL, "claude-sonnet-4-5-20250929");
-    assert_eq!(DEFAULT_OPENAI_MODEL, "gpt-5.2-codex");
+    assert_eq!(DEFAULT_CLAUDE_MODEL, "claude-sonnet-4-5");
+    assert_eq!(DEFAULT_OPENAI_MODEL, "gpt-5.2");
     assert_eq!(DEFAULT_GEMINI_MODEL, "gemini-3-flash-preview");
+    assert_eq!(DEFAULT_CODEX_MODEL, "gpt-5.3-codex");
 }

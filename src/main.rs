@@ -58,6 +58,18 @@ struct Args {
     #[arg(long, default_value = "false")]
     no_webbrowser_enhance_prompt: bool,
 
+    /// Force using xdg-open instead of explorer.exe in WSL environment
+    /// Use this if WSL localhost forwarding is disabled and browser can't reach the WSL server
+    #[arg(long, default_value = "false")]
+    force_xdg_open: bool,
+
+    /// Bind address and port for the enhance_prompt Web UI server (e.g., "127.0.0.1:8754", "0.0.0.0:3456")
+    /// If not specified, automatically selects an available port on 127.0.0.1.
+    /// WARNING: Binding to 0.0.0.0 or a non-loopback address exposes the unauthenticated
+    /// Web UI to the network. Only use this in trusted environments.
+    #[arg(long)]
+    webui_addr: Option<String>,
+
     /// Index-only mode: index current directory and exit (no MCP server)
     #[arg(long, default_value = "false")]
     index_only: bool,
@@ -153,7 +165,31 @@ async fn main() -> Result<()> {
             let _ = get_third_party_config(endpoint)
                 .map_err(|e| anyhow!("Third-party endpoint configuration error: {}", e))?;
             info!("Using third-party endpoint: {}", endpoint);
-            Config::new_for_third_party_enhancer()
+            match (args.base_url.clone(), args.token.clone()) {
+                (Some(base_url), Some(token)) => {
+                    info!("Using CLI base_url/token to enable ACE search features");
+                    Config::new(
+                        base_url,
+                        token,
+                        ConfigOptions {
+                            max_lines_per_blob: args.max_lines_per_blob,
+                            upload_timeout: args.upload_timeout,
+                            upload_concurrency: args.upload_concurrency,
+                            retrieval_timeout: args.retrieval_timeout,
+                            no_adaptive: args.no_adaptive,
+                            no_webbrowser_enhance_prompt: args.no_webbrowser_enhance_prompt,
+                            force_xdg_open: args.force_xdg_open,
+                            webui_addr: args.webui_addr.clone(),
+                        },
+                    )?
+                }
+                (None, None) => Config::new_for_third_party_enhancer(),
+                _ => {
+                    return Err(anyhow!(
+                        "--base-url and --token must be provided together in third-party enhance-prompt mode"
+                    ));
+                }
+            }
         } else {
             // For new/old endpoints, base_url and token are required
             let base_url = args
@@ -174,6 +210,8 @@ async fn main() -> Result<()> {
                     retrieval_timeout: args.retrieval_timeout,
                     no_adaptive: args.no_adaptive,
                     no_webbrowser_enhance_prompt: args.no_webbrowser_enhance_prompt,
+                    force_xdg_open: args.force_xdg_open,
+                    webui_addr: args.webui_addr.clone(),
                 },
             )?
         };
@@ -205,6 +243,8 @@ async fn main() -> Result<()> {
             retrieval_timeout: args.retrieval_timeout,
             no_adaptive: args.no_adaptive,
             no_webbrowser_enhance_prompt: args.no_webbrowser_enhance_prompt,
+            force_xdg_open: args.force_xdg_open,
+            webui_addr: args.webui_addr,
         },
     )?;
 

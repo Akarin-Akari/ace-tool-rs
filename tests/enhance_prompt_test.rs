@@ -32,7 +32,6 @@ fn test_enhance_prompt_tool_description_mentions_language_detection() {
     assert!(desc.contains("Chinese") || desc.contains("language"));
 }
 
-
 #[test]
 fn test_enhance_prompt_tool_description_mentions_post_call_behavior() {
     let desc = ENHANCE_PROMPT_TOOL.description;

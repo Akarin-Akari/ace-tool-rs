@@ -16,7 +16,7 @@ use hyper_util::rt::TokioIo;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::net::TcpListener;
-use tokio::sync::{oneshot, Mutex, OnceCell, RwLock};
+use tokio::sync::{oneshot, Mutex, RwLock};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -66,197 +66,242 @@ struct SessionResponder {
 
 /// Enhancer HTTP Server
 pub struct EnhancerServer {
-    /// Port is initialized once when server starts, using OnceCell to ensure
-    /// atomic initialization and prevent race conditions between start() and get_port()
-    port: OnceCell<u16>,
+    /// The actual address the server is listening on (set after start).
+    /// Also serves as the "running" indicator: `Some` means server is running.
+    actual_addr: Arc<RwLock<Option<SocketAddr>>>,
     sessions: Arc<RwLock<HashMap<String, SessionData>>>,
     responders: Arc<Mutex<HashMap<String, SessionResponder>>>,
     enhance_callback: Arc<RwLock<Option<EnhanceCallback>>>,
+    /// Custom bind address requested via --webui-addr (set before start)
+    bind_addr: Arc<RwLock<Option<SocketAddr>>>,
     pub timeout_ms: u64,
 }
 
 impl EnhancerServer {
     pub fn new() -> Self {
         Self {
-            port: OnceCell::new(),
+            actual_addr: Arc::new(RwLock::new(None)),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             responders: Arc::new(Mutex::new(HashMap::new())),
             enhance_callback: Arc::new(RwLock::new(None)),
+            bind_addr: Arc::new(RwLock::new(None)),
             timeout_ms: 8 * 60 * 1000, // 8 minutes
         }
     }
 
-    /// Start HTTP server
-    /// Uses OnceCell to ensure the server is started exactly once and all callers
-    /// wait for the port to be determined before returning.
-    pub async fn start(&self) -> Result<u16> {
-        // Use get_or_try_init to ensure atomic initialization
-        // All concurrent callers will wait for the first initialization to complete
-        let port = self
-            .port
-            .get_or_try_init(|| async {
-                // Start from port 3010 (custom default to avoid conflicts with common dev servers)
-                // With robust conflict detection for 0.0.0.0 and 127.0.0.1
-                let start_port = 3010;
-                let max_attempts = 50; // Try up to 50 ports (3010-3059) for plenty of backup
-                let mut port = start_port;
-                let mut listener: Option<TcpListener> = None;
-                let mut attempts = 0;
+    /// Set custom bind address for the server.
+    /// Must be called before `start()`. Has no effect if the server is already running.
+    pub async fn set_bind_addr(&self, addr: SocketAddr) {
+        let actual = self.actual_addr.read().await;
+        if actual.is_some() {
+            warn!("Server is already running, ignoring set_bind_addr");
+            return;
+        }
+        let mut bind_addr = self.bind_addr.write().await;
+        *bind_addr = Some(addr);
+    }
 
-                info!("Starting port discovery from port {}", start_port);
+    /// Start HTTP server.
+    ///
+    /// Holds the `actual_addr` write lock through the bind phase so that concurrent
+    /// callers block until the server is fully ready (port is known). A second call
+    /// after the server is running returns immediately.
+    pub async fn start(&self) -> Result<()> {
+        let mut actual = self.actual_addr.write().await;
+        if actual.is_some() {
+            return Ok(()); // Already running
+        }
 
-                // Try to bind to port, increment if in use
-                // IMPORTANT: Check BOTH 0.0.0.0 and 127.0.0.1 to avoid conflicts
-                // If another process binds to 0.0.0.0:port, it will intercept requests
-                // even if we successfully bind to 127.0.0.1:port
-                for attempt in 0..max_attempts {
-                    attempts = attempt + 1;
+        let custom_addr = *self.bind_addr.read().await;
+        let listener: TcpListener;
 
-                    // First check if 0.0.0.0:port is in use (catches processes binding to all interfaces)
-                    let wildcard_in_use = match TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await {
-                        Ok(test_listener) => {
-                            // Port is free on all interfaces, drop the test listener
-                            drop(test_listener);
-                            false
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => true,
-                        Err(e) => {
-                            // Other errors (permission denied, etc.)
-                            warn!("Failed to check 0.0.0.0:{}: {}", port, e);
-                            true // Treat as in use to be safe
-                        }
-                    };
-
-                    if wildcard_in_use {
-                        if attempt == 0 {
-                            warn!(
-                                "Port {} is in use on 0.0.0.0 (likely by frontend dev server), trying alternative ports...",
-                                port
-                            );
-                        }
-                        port += 1;
-                        if attempt < 5 || attempt % 10 == 0 {
-                            info!("Port {} in use (0.0.0.0), trying port {}...", port - 1, port);
-                        }
-                        continue;
-                    }
-
-                    // Now try to bind to 127.0.0.1 (localhost only) for security
-                    match TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await {
-                        Ok(l) => {
-                            listener = Some(l);
-                            if port != start_port {
-                                info!(
-                                    "Port {} was in use, successfully bound to alternative port {}",
-                                    start_port, port
-                                );
-                            } else {
-                                info!("Successfully bound to default port {}", port);
-                            }
-                            break;
-                        }
-                        Err(e) => {
-                            if e.kind() == std::io::ErrorKind::AddrInUse {
-                                if attempt == 0 {
-                                    warn!(
-                                        "Port {} is in use on 127.0.0.1, trying alternative ports...",
-                                        port
-                                    );
-                                }
-                                port += 1;
-                                if attempt < 5 || attempt % 10 == 0 {
-                                    info!("Port {} in use (127.0.0.1), trying port {}...", port - 1, port);
-                                }
-                            } else {
-                                return Err(anyhow!("Failed to bind to port {}: {}", port, e));
-                            }
-                        }
-                    }
+        if let Some(addr) = custom_addr {
+            // Warn if binding to a non-loopback address (security risk)
+            if !addr.ip().is_loopback() {
+                warn!(
+                    "Binding to non-loopback address {}. The Web UI has no authentication \
+                     and will be accessible from the network.",
+                    addr
+                );
+            }
+            // Use the user-specified address directly
+            match TcpListener::bind(addr).await {
+                Ok(l) => {
+                    listener = l;
                 }
+                Err(e) => {
+                    return Err(anyhow!("Failed to bind to {}: {}", addr, e));
+                }
+            }
+        } else {
+            // Start from port 3010 (custom default to avoid conflicts with common dev servers)
+            // With robust conflict detection for 0.0.0.0 and 127.0.0.1
+            let start_port = 3010;
+            let max_attempts = 50; // Try up to 50 ports (3010-3059) for plenty of backup
+            let mut port = start_port;
+            let mut attempts = 0;
+            let mut bound: Option<TcpListener> = None;
 
-                let listener = match listener {
-                    Some(l) => l,
-                    None => {
-                        return Err(anyhow!(
-                            "Could not find available port after {} attempts (tried ports {}-{})",
-                            attempts,
-                            start_port,
-                            port - 1
-                        ));
+            info!("Starting port discovery from port {}", start_port);
+
+            // Try to bind to port, increment if in use
+            // IMPORTANT: Check BOTH 0.0.0.0 and 127.0.0.1 to avoid conflicts
+            for attempt in 0..max_attempts {
+                attempts = attempt + 1;
+
+                // First check if 0.0.0.0:port is in use
+                let wildcard_in_use = match TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await {
+                    Ok(test_listener) => {
+                        drop(test_listener);
+                        false
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => true,
+                    Err(e) => {
+                        warn!("Failed to check 0.0.0.0:{}: {}", port, e);
+                        true
                     }
                 };
 
-                info!(
-                    "Enhancer server started: http://localhost:{} (attempted {} ports)",
-                    port, attempts
-                );
+                if wildcard_in_use {
+                    if attempt == 0 {
+                        warn!(
+                            "Port {} is in use on 0.0.0.0 (likely by frontend dev server), trying alternative ports...",
+                            port
+                        );
+                    }
+                    port += 1;
+                    continue;
+                }
 
-                // Clone references for the server task
-                let sessions = self.sessions.clone();
-                let responders = self.responders.clone();
-                let enhance_callback = self.enhance_callback.clone();
-                let timeout_ms = self.timeout_ms;
-
-                // Spawn server task
-                tokio::spawn(async move {
-                    loop {
-                        let (stream, addr) = match listener.accept().await {
-                            Ok(conn) => conn,
-                            Err(e) => {
-                                error!("Failed to accept connection: {}", e);
-                                continue;
+                // Now try to bind to 127.0.0.1 (localhost only) for security
+                match TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await {
+                    Ok(l) => {
+                        bound = Some(l);
+                        if port != start_port {
+                            info!(
+                                "Port {} was in use, successfully bound to alternative port {}",
+                                start_port, port
+                            );
+                        } else {
+                            info!("Successfully bound to default port {}", port);
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        if e.kind() == std::io::ErrorKind::AddrInUse {
+                            if attempt == 0 {
+                                warn!(
+                                    "Port {} is in use on 127.0.0.1, trying alternative ports...",
+                                    port
+                                );
                             }
-                        };
+                            port += 1;
+                        } else {
+                            return Err(anyhow!("Failed to bind to port {}: {}", port, e));
+                        }
+                    }
+                }
+            }
 
-                        info!("New connection accepted from: {}", addr);
+            listener = match bound {
+                Some(l) => l,
+                None => {
+                    return Err(anyhow!(
+                        "Could not find available port after {} attempts (tried ports {}-{})",
+                        attempts,
+                        start_port,
+                        port - 1
+                    ));
+                }
+            };
+        }
 
-                        let io = TokioIo::new(stream);
+        // Use local_addr() as the source of truth for the actual bound address
+        let local_addr = listener.local_addr()?;
+        *actual = Some(local_addr);
+        drop(actual);
+
+        info!("Enhancer server started: http://{}", local_addr);
+
+        // Clone references for the server task
+        let sessions = self.sessions.clone();
+        let responders = self.responders.clone();
+        let enhance_callback = self.enhance_callback.clone();
+        let timeout_ms = self.timeout_ms;
+
+        // Spawn server task
+        tokio::spawn(async move {
+            loop {
+                let (stream, addr) = match listener.accept().await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        error!("Failed to accept connection: {}", e);
+                        continue;
+                    }
+                };
+
+                info!("New connection accepted from: {}", addr);
+
+                let io = TokioIo::new(stream);
+                let sessions = sessions.clone();
+                let responders = responders.clone();
+                let enhance_callback = enhance_callback.clone();
+
+                tokio::spawn(async move {
+                    let service = service_fn(|req| {
                         let sessions = sessions.clone();
                         let responders = responders.clone();
                         let enhance_callback = enhance_callback.clone();
+                        async move {
+                            info!("Service function called for request");
+                            handle_request(
+                                req,
+                                sessions,
+                                responders,
+                                enhance_callback,
+                                timeout_ms,
+                            )
+                            .await
+                        }
+                    });
 
-                        tokio::spawn(async move {
-                            let service = service_fn(|req| {
-                                let sessions = sessions.clone();
-                                let responders = responders.clone();
-                                let enhance_callback = enhance_callback.clone();
-                                async move {
-                                    info!("Service function called for request");
-                                    handle_request(
-                                        req,
-                                        sessions,
-                                        responders,
-                                        enhance_callback,
-                                        timeout_ms,
-                                    )
-                                    .await
-                                }
-                            });
-
-                            info!("Starting to serve connection");
-                            if let Err(e) = http1::Builder::new().serve_connection(io, service).await
-                            {
-                                if !e.to_string().contains("connection closed") {
-                                    error!("Error serving connection: {}", e);
-                                } else {
-                                    info!("Connection closed normally");
-                                }
-                            }
-                        });
+                    info!("Starting to serve connection");
+                    if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
+                        if !e.to_string().contains("connection closed") {
+                            error!("Error serving connection: {}", e);
+                        } else {
+                            info!("Connection closed normally");
+                        }
                     }
                 });
+            }
+        });
 
-                Ok(port)
-            })
-            .await?;
-
-        Ok(*port)
+        Ok(())
     }
 
-    /// Get server port
-    /// Returns None if server hasn't been started yet
-    pub fn get_port(&self) -> Option<u16> {
-        self.port.get().copied()
+    /// Get server port (from actual bound address)
+    pub async fn get_port(&self) -> Option<u16> {
+        self.actual_addr.read().await.map(|addr| addr.port())
+    }
+
+    /// Get the host string for browser URL (from actual bound address).
+    /// - Unspecified addresses (0.0.0.0, ::) are replaced with "localhost"
+    /// - IPv6 addresses are wrapped in brackets for URL compatibility
+    pub async fn get_host(&self) -> String {
+        match *self.actual_addr.read().await {
+            Some(addr) => {
+                let ip = addr.ip();
+                if ip.is_unspecified() {
+                    "localhost".to_string()
+                } else if ip.is_ipv6() {
+                    format!("[{}]", ip)
+                } else {
+                    ip.to_string()
+                }
+            }
+            None => "localhost".to_string(),
+        }
     }
 
     /// Create new session and return a receiver for the result
@@ -888,11 +933,11 @@ mod tests {
         // Default should work the same as new()
     }
 
-    #[test]
-    fn test_enhancer_server_get_port_before_start() {
+    #[tokio::test]
+    async fn test_enhancer_server_get_port_before_start() {
         let server = EnhancerServer::new();
         // Before start(), get_port() should return None
-        let port = server.get_port();
+        let port = server.get_port().await;
         assert!(port.is_none());
     }
 

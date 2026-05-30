@@ -272,23 +272,8 @@ impl IndexManager {
         &self.config_hash
     }
 
-    /// Load gitignore patterns
-    fn load_gitignore(&self) -> Option<Gitignore> {
-        let gitignore_path = self.project_root.join(".gitignore");
-        if !gitignore_path.exists() {
-            return None;
-        }
-
-        let mut builder = GitignoreBuilder::new(&self.project_root);
-        // Log warning if gitignore has errors, but continue with valid patterns
-        if let Some(err) = builder.add(&gitignore_path) {
-            warn!(
-                "Error parsing .gitignore (continuing with valid patterns): {}",
-                err
-            );
-        }
-
-        builder.build().ok()
+    fn load_ignore_patterns(&self) -> Option<Gitignore> {
+        build_ignore_rules(&self.project_root)
     }
 
     /// Check if a path should be excluded
@@ -558,7 +543,7 @@ impl IndexManager {
     /// Collect all text files
     pub fn collect_files(&self) -> Result<Vec<Blob>> {
         let mut blobs = Vec::new();
-        let gitignore = self.load_gitignore();
+        let gitignore = self.load_ignore_patterns();
 
         for entry in WalkDir::new(&self.project_root)
             .follow_links(false)
@@ -1712,6 +1697,37 @@ fn split_file_content_standalone(
     blobs
 }
 
+fn build_ignore_rules(project_root: &Path) -> Option<Gitignore> {
+    let ignore_files = [".gitignore", ".aceignore"];
+    let paths: Vec<_> = ignore_files
+        .iter()
+        .map(|f| project_root.join(f))
+        .filter(|p| p.exists())
+        .collect();
+
+    if paths.is_empty() {
+        return None;
+    }
+
+    let mut builder = GitignoreBuilder::new(project_root);
+    for path in &paths {
+        if let Some(err) = builder.add(path) {
+            warn!(
+                "Error parsing {} (continuing with valid patterns): {}",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                err
+            );
+        }
+    }
+    match builder.build() {
+        Ok(gi) => Some(gi),
+        Err(err) => {
+            warn!("Failed to build ignore rules: {}", err);
+            None
+        }
+    }
+}
+
 /// Standalone file path collection for use in spawn_blocking
 fn collect_file_paths_standalone(
     project_root: &Path,
@@ -1719,17 +1735,7 @@ fn collect_file_paths_standalone(
     text_filenames: &HashSet<String>,
     compiled_patterns: &[(String, Option<Regex>)],
 ) -> Vec<PathBuf> {
-    // Load gitignore
-    let gitignore = {
-        let gitignore_path = project_root.join(".gitignore");
-        if gitignore_path.exists() {
-            let mut builder = GitignoreBuilder::new(project_root);
-            let _ = builder.add(&gitignore_path);
-            builder.build().ok()
-        } else {
-            None
-        }
-    };
+    let gitignore = build_ignore_rules(project_root);
 
     WalkDir::new(project_root)
         .follow_links(false)

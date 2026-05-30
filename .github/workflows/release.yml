@@ -135,6 +135,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -156,16 +158,47 @@ jobs:
           sha256sum *.tar.gz *.zip > SHA256SUMS
           cat SHA256SUMS
 
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the current tag
+          CURRENT_TAG=${GITHUB_REF#refs/tags/}
+
+          # Get the previous tag
+          PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -A1 "^${CURRENT_TAG}$" | tail -n1)
+
+          echo "Current tag: $CURRENT_TAG"
+          echo "Previous tag: $PREVIOUS_TAG"
+
+          # Generate changelog header
+          echo "## What's Changed" > changelog.md
+          echo "" >> changelog.md
+
+          # Generate changelog from commits
+          if [ -z "$PREVIOUS_TAG" ] || [ "$PREVIOUS_TAG" = "$CURRENT_TAG" ]; then
+            echo "No previous tag found, using all commits"
+            git log --pretty=format:"- %s (%h)" --no-merges >> changelog.md
+          else
+            echo "Generating changelog from $PREVIOUS_TAG to $CURRENT_TAG"
+            git log ${PREVIOUS_TAG}..${CURRENT_TAG} --pretty=format:"- %s (%h)" --no-merges >> changelog.md
+          fi
+
+          echo "" >> changelog.md
+          echo "" >> changelog.md
+          echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${CURRENT_TAG}" >> changelog.md
+
+          cat changelog.md
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           draft: false
           prerelease: false
+          body_path: changelog.md
           files: |
             artifacts/*.tar.gz
             artifacts/*.zip
             artifacts/SHA256SUMS
-          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
 

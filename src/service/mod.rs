@@ -2,6 +2,7 @@
 
 pub(crate) mod augment;
 pub(crate) mod claude;
+pub(crate) mod codex;
 pub mod common;
 pub(crate) mod gemini;
 pub(crate) mod openai;
@@ -12,13 +13,14 @@ pub use augment::{
     NODE_ID_OLD,
 };
 pub use claude::call_claude_endpoint;
+pub use codex::call_codex_endpoint;
 pub use common::{
-    default_model_for, extract_enhanced_prompt, first_nonempty_text, get_third_party_config,
-    has_nonempty_env, is_chinese_text, parse_chat_history, provider_defaults, read_nonempty_env,
-    render_enhance_prompt, replace_tool_names, resolve_third_party_config, ChatMessage,
-    EnhancerEndpoint, ResolvedThirdPartyConfig, ThirdPartyConfig, DEFAULT_CLAUDE_MODEL,
-    DEFAULT_GEMINI_MODEL, DEFAULT_OPENAI_MODEL, ENV_ENHANCER_BASE_URL, ENV_ENHANCER_MODEL,
-    ENV_ENHANCER_TOKEN,
+    build_api_url, default_model_for, extract_enhanced_prompt, first_nonempty_text,
+    get_third_party_config, has_nonempty_env, is_chinese_text, parse_chat_history,
+    provider_defaults, read_nonempty_env, render_enhance_prompt, replace_tool_names,
+    resolve_third_party_config, ChatMessage, EnhancerEndpoint, ResolvedThirdPartyConfig,
+    ThirdPartyConfig, DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_GEMINI_MODEL,
+    DEFAULT_OPENAI_MODEL, ENV_ENHANCER_BASE_URL, ENV_ENHANCER_MODEL, ENV_ENHANCER_TOKEN,
 };
 pub use gemini::call_gemini_endpoint;
 pub use openai::call_openai_endpoint;

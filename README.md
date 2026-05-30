@@ -14,7 +14,7 @@ ace-tool-rs is a Rust implementation of a codebase context engine that enables A
 - **Multi-language support** - Works with 50+ programming languages and file types
 - **Incremental updates** - Uses mtime caching to skip unchanged files and only uploads new/modified content
 - **Parallel processing** - Multi-threaded file scanning and processing for faster indexing
-- **Smart exclusions** - Respects `.gitignore` and common ignore patterns
+- **Smart exclusions** - Respects `.gitignore`, `.aceignore` and common ignore patterns
 
 ## Features
 
@@ -80,6 +80,8 @@ ace-tool-rs --base-url <API_URL> --token <AUTH_TOKEN>
 | `--upload-concurrency` | Override upload concurrency (disables adaptive concurrency) |
 | `--no-adaptive` | Disable adaptive strategy, use static heuristic values |
 | `--no-webbrowser-enhance-prompt` | Disable web browser interaction for enhance_prompt, return API result directly |
+| `--force-xdg-open` | Force using xdg-open instead of explorer.exe in WSL environment |
+| `--webui-addr` | Bind address and port for the enhance_prompt Web UI server (e.g., `127.0.0.1:8754`, `0.0.0.0:3456`). If not specified, automatically selects an available port on 127.0.0.1. **Warning:** binding to a non-loopback address exposes the unauthenticated Web UI to the network |
 | `--index-only` | Index current directory and exit (no MCP server) |
 | `--enhance-prompt` | Enhance a prompt and output the result to stdout, then exit |
 | `--max-lines-per-blob` | Maximum lines per blob chunk (default: 800) |
@@ -91,20 +93,21 @@ ace-tool-rs --base-url <API_URL> --token <AUTH_TOKEN>
 |----------|-------------|
 | `RUST_LOG` | Set log level (e.g., `info`, `debug`, `warn`) |
 | `PROMPT_ENHANCER` | Control `enhance_prompt` tool exposure: set to `disabled`, `false`, `0`, or `off` to hide and disable the tool |
-| `ACE_ENHANCER_ENDPOINT` | Endpoint selection. Default: `local` (no network). Other values: `auto`, `new`, `old`, `claude`, `openai`, `gemini`. See [Endpoint Selection](#prompt-enhancer-endpoint-selection) below. |
-| `ACE_ENHANCER_PREFERRED_PROVIDER` | When `ACE_ENHANCER_ENDPOINT=auto`, force a specific provider (`claude` / `openai` / `gemini`) instead of the deterministic scan order |
+| `PROMPT_ENHANCER_ENDPOINT` | Endpoint selection. Default: `local` (no network). Other values: `auto`, `new`, `old`, `claude`, `openai`, `gemini`, `codex`. (also reads `ACE_ENHANCER_ENDPOINT` as fallback). See [Endpoint Selection](#prompt-enhancer-endpoint-selection) below. |
+| `ACE_ENHANCER_PREFERRED_PROVIDER` | When endpoint is `auto`, force a specific provider (`claude` / `openai` / `gemini` / `codex`) instead of the deterministic scan order |
 | `PROMPT_ENHANCER_BASE_URL` | Base URL override for third-party APIs (optional; falls back to provider defaults like `https://api.anthropic.com`) |
 | `PROMPT_ENHANCER_TOKEN` | API token override (optional; falls back to provider-standard keys like `ANTHROPIC_API_KEY`) |
 | `PROMPT_ENHANCER_MODEL` | Model name override (optional; falls back to per-provider sensible defaults) |
+| `PROMPT_ENHANCER_INCLUDE_SEARCH_CONTEXT` | When set to `1`, `true`, `yes`, or `on`, runs `search_context` before third-party prompt enhancement and injects the retrieval result into the enhancement input |
 | `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` | Provider-standard API keys. Used as fallback when `PROMPT_ENHANCER_TOKEN` is unset, and used by `auto` mode for provider detection |
 
 ### Prompt Enhancer Endpoint Selection
 
 > **Behavioral change in v0.1.11+** — Previous versions defaulted to `new` (which calls the Augment cloud endpoint).
 > Starting with v0.1.11, the default is **`local`** (no network call, returns the original prompt unchanged) for safety
-> and predictability. If you relied on the implicit `new` default, set `ACE_ENHANCER_ENDPOINT=new` explicitly.
+> and predictability. If you relied on the implicit `new` default, set `PROMPT_ENHANCER_ENDPOINT=new` explicitly.
 
-The enhancer supports six endpoint modes plus an auto-detection mode:
+The enhancer supports seven endpoint modes plus an auto-detection mode:
 
 | Value | Behavior | Network? |
 |-------|----------|:--------:|
@@ -114,9 +117,10 @@ The enhancer supports six endpoint modes plus an auto-detection mode:
 | `claude` | Anthropic Claude API. Reads token from `PROMPT_ENHANCER_TOKEN` then `ANTHROPIC_API_KEY`. | ✅ |
 | `openai` | OpenAI API. Reads token from `PROMPT_ENHANCER_TOKEN` then `OPENAI_API_KEY`. | ✅ |
 | `gemini` | Google Gemini API. Reads token from `PROMPT_ENHANCER_TOKEN` then `GEMINI_API_KEY`. | ✅ |
+| `codex` | Codex API (OpenAI Responses API). Reads token from `PROMPT_ENHANCER_TOKEN` then `OPENAI_API_KEY`. | ✅ |
 | `auto` | **Opt-in** auto-detection: scans `ANTHROPIC_API_KEY` → `GEMINI_API_KEY` → `OPENAI_API_KEY` and picks the first one present. Falls back to `local` with a `WARN` log if none are set. | ✅ (only when a key is found) |
 
-**Auto-detection priority (`ACE_ENHANCER_ENDPOINT=auto`):**
+**Auto-detection priority (`PROMPT_ENHANCER_ENDPOINT=auto`):**
 
 1. If `ACE_ENHANCER_PREFERRED_PROVIDER` is set (e.g. `openai`), use it. Errors out if the matching API key is missing.
 2. Otherwise, scan in order: Claude → Gemini → OpenAI. The first non-empty key wins.
@@ -204,6 +208,36 @@ Add to your Claude Desktop configuration file:
 }
 ```
 
+### OpenCode
+
+For OpenCode or similar agent-style clients, the smoothest setup is usually to disable the browser review step so the enhanced prompt is returned directly to the agent:
+
+```json
+{
+  "mcpServers": {
+    "ace-tool": {
+      "command": "npx",
+      "args": [
+        "ace-tool-rs",
+        "--base-url", "https://api.example.com",
+        "--token", "your-token-here",
+        "--no-webbrowser-enhance-prompt"
+      ]
+    }
+  }
+}
+```
+
+`--transport lsp` can still be added if your MCP client specifically requires LSP framing, but many clients can use the default `auto` mode.
+
+Recommended workflow in OpenCode:
+
+1. Ask the agent to call `enhance_prompt` only when you explicitly want prompt rewriting.
+2. Let the tool return the enhanced result directly.
+3. Have the agent use that returned text as the next implementation prompt.
+
+If you prefer manual review in a browser, omit `--no-webbrowser-enhance-prompt` and complete the Web UI step before expecting the MCP call to finish.
+
 ### Claude Code
 
 Run command like below:
@@ -250,6 +284,18 @@ Search the codebase using natural language queries.
 
 Enhance user prompts by combining codebase context and conversation history to generate clearer, more specific, and actionable prompts.
 
+**How it behaves by default:**
+
+- The MCP tool first calls the prompt-enhancer API.
+- It then starts a small local Web UI and waits for the user to review, edit, and click **Send**.
+- While waiting for that confirmation, the MCP client may look like it has "stopped" after the tool call. This is expected: the tool is waiting for the browser step to finish.
+
+**If you want a fully in-terminal / non-browser flow:**
+
+- Start ace-tool-rs with `--no-webbrowser-enhance-prompt`.
+- In that mode, `enhance_prompt` returns the API result directly to the MCP client without opening a browser.
+- This mode is usually the best fit for agent-style tools such as OpenCode when you want the enhanced prompt to flow straight back into the conversation.
+
 **Parameters:**
 
 | Parameter | Type | Required | Description |
@@ -266,39 +312,68 @@ Enhance user prompts by combining codebase context and conversation history to g
 
 **API Endpoints:**
 
-The tool supports multiple backend endpoints, controlled by the `ACE_ENHANCER_ENDPOINT` environment variable:
+The tool supports multiple backend endpoints, controlled by the `PROMPT_ENHANCER_ENDPOINT` environment variable (with `ACE_ENHANCER_ENDPOINT` as a backward-compatible fallback):
 
 | Endpoint | Description | Configuration |
 |----------|-------------|---------------|
 | `new` (default) | Augment `/prompt-enhancer` endpoint | Uses `--base-url` and `--token` CLI args |
 | `old` | Augment `/chat-stream` endpoint (streaming) | Uses `--base-url` and `--token` CLI args |
-| `claude` | Claude API (Anthropic) | Uses `PROMPT_ENHANCER_*` env vars |
-| `openai` | OpenAI API | Uses `PROMPT_ENHANCER_*` env vars |
-| `gemini` | Gemini API (Google) | Uses `PROMPT_ENHANCER_*` env vars |
+| `claude` | Claude API (Anthropic `/v1/messages`) | Uses `PROMPT_ENHANCER_*` env vars |
+| `openai` | OpenAI API (ChatGPT `/v1/chat/completions`) | Uses `PROMPT_ENHANCER_*` env vars |
+| `gemini` | Gemini API (Google `/v1beta/models/<model>:streamGenerateContent`) | Uses `PROMPT_ENHANCER_*` env vars |
+| `codex` | Codex API (OpenAI Responses API `/v1/responses`) | Uses `PROMPT_ENHANCER_*` env vars |
 
 **Default Models for Third-Party APIs:**
 
 | Provider | Default Model |
 |----------|---------------|
-| Claude | `claude-sonnet-4-20250514` |
-| OpenAI | `gpt-4o` |
-| Gemini | `gemini-2.0-flash-exp` |
+| Claude | `claude-sonnet-4-5` |
+| OpenAI | `gpt-5.2` |
+| Gemini | `gemini-3-flash-preview` |
+| Codex | `gpt-5.3-codex` |
 
 **Example using Claude API:**
 
 ```bash
 # For MCP server mode, --base-url and --token are still required
-export ACE_ENHANCER_ENDPOINT=claude
+export PROMPT_ENHANCER_ENDPOINT=claude
 export PROMPT_ENHANCER_BASE_URL=https://api.anthropic.com
 export PROMPT_ENHANCER_TOKEN=your-anthropic-api-key
 ace-tool-rs --base-url https://api.example.com --token your-token
 
 # For --enhance-prompt mode with third-party endpoints, --base-url and --token are optional
-export ACE_ENHANCER_ENDPOINT=claude
+export PROMPT_ENHANCER_ENDPOINT=claude
 export PROMPT_ENHANCER_BASE_URL=https://api.anthropic.com
 export PROMPT_ENHANCER_TOKEN=your-anthropic-api-key
 ace-tool-rs --enhance-prompt "Add user authentication"
+
+# If you also want to inject search_context before third-party enhancement,
+# you must additionally provide ACE search credentials via --base-url/--token
+export PROMPT_ENHANCER_INCLUDE_SEARCH_CONTEXT=1
+ace-tool-rs \
+  --base-url https://api.example.com \
+  --token your-ace-token \
+  --enhance-prompt "Add user authentication"
 ```
+
+**Example using Codex API:**
+
+```bash
+# Codex uses OpenAI Responses API (/v1/responses)
+export PROMPT_ENHANCER_ENDPOINT=codex
+export PROMPT_ENHANCER_BASE_URL=https://api.openai.com
+export PROMPT_ENHANCER_TOKEN=your-openai-api-key
+# Optional: export PROMPT_ENHANCER_MODEL=codex-mini
+ace-tool-rs --enhance-prompt "Refactor authentication logic"
+```
+
+**Using `search_context` with third-party enhancement:**
+
+- Applies only to `claude` / `openai` / `gemini` / `codex`
+- Requires `PROMPT_ENHANCER_INCLUDE_SEARCH_CONTEXT=1`
+- In MCP server mode, `--base-url` and `--token` are already required
+- In one-shot `--enhance-prompt` mode, enabling this feature also requires `--base-url` and `--token`
+- When explicitly enabled, search failures are returned as real errors instead of silently falling back to plain enhancement
 
 ## Supported File Types
 
@@ -330,6 +405,22 @@ The following patterns are excluded by default:
 - **Media files**: `*.png`, `*.jpg`, `*.mp4`, `*.pdf`
 - **Lock files**: `package-lock.json`, `yarn.lock`, `Cargo.lock`
 
+### Custom Exclusions
+
+You can customize file filtering by creating a `.aceignore` file in your project root. It uses the same syntax as `.gitignore`:
+
+```gitignore
+# Exclude specific directories
+my-private-folder/
+temp-data/
+
+# Exclude file patterns
+*.local
+*.secret
+```
+
+Both `.gitignore` and `.aceignore` patterns are merged, with `.aceignore` taking precedence in case of conflicts.
+
 ## Architecture
 
 ```
@@ -341,6 +432,7 @@ ace-tool-rs/
 │   ├── enhancer/
 │   │   ├── mod.rs
 │   │   ├── prompt_enhancer.rs  # Prompt enhancement orchestration
+│   │   ├── server.rs           # Web UI HTTP server
 │   │   └── templates.rs        # Enhancement prompt templates
 │   ├── index/
 │   │   ├── mod.rs
@@ -355,7 +447,8 @@ ace-tool-rs/
 │   │   ├── augment.rs   # Augment New/Old endpoints
 │   │   ├── claude.rs    # Claude API (Anthropic)
 │   │   ├── openai.rs    # OpenAI API
-│   │   └── gemini.rs    # Gemini API (Google)
+│   │   ├── gemini.rs    # Gemini API (Google)
+│   │   └── codex.rs     # Codex API (OpenAI Responses API)
 │   ├── strategy/
 │   │   ├── mod.rs
 │   │   ├── adaptive.rs  # AIMD algorithm implementation
@@ -368,6 +461,7 @@ ace-tool-rs/
 │       └── project_detector.rs  # Project utilities
 └── tests/               # Integration tests
     ├── config_test.rs
+    ├── enhancer_server_test.rs
     ├── index_test.rs
     ├── mcp_test.rs
     ├── prompt_enhancer_test.rs
@@ -468,7 +562,7 @@ cargo clippy
 
 ## Limitations
 
-- Only processes the root `.gitignore` file (nested `.gitignore` files are not supported)
+- Only processes the root `.gitignore` and `.aceignore` files (nested ignore files are not supported)
 - Requires network access to the indexing API
 - Maximum file size: 128KB per file
 - Maximum batch size: 1MB per upload batch

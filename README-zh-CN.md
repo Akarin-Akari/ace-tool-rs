@@ -14,7 +14,7 @@ ace-tool-rs 是一个 Rust 实现的代码库上下文引擎，使 AI 助手能�
 - **多语言支持** - 支持 50+ 种编程语言和文件类型
 - **增量更新** - 使用 mtime 缓存跳过未更改的文件，仅上传新增/修改的内容
 - **并行处理** - 多线程文件扫描和处理，加快索引速度
-- **智能排除** - 遵循 `.gitignore` 和常见的忽略模式
+- **智能排除** - 遵循 `.gitignore`、`.aceignore` 和常见的忽略模式
 
 ## 特性
 
@@ -80,6 +80,8 @@ ace-tool-rs --base-url <API_URL> --token <AUTH_TOKEN>
 | `--upload-concurrency` | 覆盖上传并发度，禁用自适应并发 |
 | `--no-adaptive` | 禁用自适应策略，使用静态启发式值 |
 | `--no-webbrowser-enhance-prompt` | 禁用 enhance_prompt 的浏览器交互，直接返回 API 结果 |
+| `--force-xdg-open` | 在 WSL 环境中强制使用 xdg-open 代替 explorer.exe |
+| `--webui-addr` | enhance_prompt Web UI 服务器的绑定地址和端口（如 `127.0.0.1:8754`、`0.0.0.0:3456`）。未指定时自动在 127.0.0.1 上选择可用端口。**警告：** 绑定到非回环地址会将无认证的 Web UI 暴露到网络中 |
 | `--index-only` | 仅索引当前目录并退出（不启动 MCP 服务器） |
 | `--enhance-prompt` | 增强提示词并输出到标准输出，然后退出 |
 | `--max-lines-per-blob` | 每个 blob 块的最大行数（默认：800） |
@@ -91,10 +93,11 @@ ace-tool-rs --base-url <API_URL> --token <AUTH_TOKEN>
 |------|------|
 | `RUST_LOG` | 设置日志级别（如 `info`、`debug`、`warn`） |
 | `PROMPT_ENHANCER` | 控制 `enhance_prompt` 工具的暴露：设置为 `disabled`、`false`、`0` 或 `off` 可隐藏并禁用该工具 |
-| `ACE_ENHANCER_ENDPOINT` | 端点选择：`new`（默认）、`old`、`claude`、`openai` 或 `gemini` |
-| `PROMPT_ENHANCER_BASE_URL` | 第三方 API 的基础 URL（`claude`/`openai`/`gemini` 必需） |
-| `PROMPT_ENHANCER_TOKEN` | 第三方 API 的密钥（`claude`/`openai`/`gemini` 必需） |
+| `PROMPT_ENHANCER_ENDPOINT` | 端点选择：`new`（默认）、`old`、`claude`、`openai`、`gemini` 或 `codex`（同时支持 `ACE_ENHANCER_ENDPOINT` 作为向后兼容） |
+| `PROMPT_ENHANCER_BASE_URL` | 第三方 API 的基础 URL（`claude`/`openai`/`gemini`/`codex` 必需） |
+| `PROMPT_ENHANCER_TOKEN` | 第三方 API 的密钥（`claude`/`openai`/`gemini`/`codex` 必需） |
 | `PROMPT_ENHANCER_MODEL` | 第三方 API 的模型名称覆盖（可选） |
+| `PROMPT_ENHANCER_INCLUDE_SEARCH_CONTEXT` | 设为 `1`、`true`、`yes` 或 `on` 时，在第三方提示词增强前先执行一次 `search_context`，将检索结果注入增强输入 |
 
 ### 示例
 
@@ -148,6 +151,36 @@ startup_timeout_ms = 60000
 }
 ```
 
+### OpenCode
+
+对于 OpenCode 或类似的 agent 型客户端，通常最顺滑的配置是关闭浏览器审阅步骤，让增强后的提示词直接返回给 agent：
+
+```json
+{
+  "mcpServers": {
+    "ace-tool": {
+      "command": "npx",
+      "args": [
+        "ace-tool-rs",
+        "--base-url", "https://api.example.com",
+        "--token", "your-token-here",
+        "--no-webbrowser-enhance-prompt"
+      ]
+    }
+  }
+}
+```
+
+如果你的 MCP 客户端明确要求 LSP 帧格式，也可以额外加上 `--transport lsp`；否则很多客户端直接使用默认的 `auto` 模式即可。
+
+推荐在 OpenCode 中这样使用：
+
+1. 仅在你明确需要“改写/增强提示词”时，让 agent 调用 `enhance_prompt`。
+2. 让工具直接返回增强后的结果。
+3. 再让 agent 把这段结果作为下一条实现请求继续执行。
+
+如果你更喜欢在浏览器里手动审阅，就不要传 `--no-webbrowser-enhance-prompt`，并在期待 MCP 调用结束之前先完成 Web UI 中的确认步骤。
+
 ### Claude Code
 
 运行以下命令：
@@ -194,6 +227,18 @@ $ cat settings.local.json
 
 通过结合代码库上下文和对话历史来增强用户提示词，生成更清晰、更具体、更可操作的提示词。
 
+**默认行为说明：**
+
+- MCP 工具会先调用 prompt-enhancer API。
+- 随后会启动一个本地 Web UI，等待用户审阅、编辑并点击 **Send**。
+- 在等待确认期间，MCP 客户端看起来像是“卡在 send 之后不动了”，这是预期行为：工具正在等待浏览器中的确认步骤完成。
+
+**如果你希望完全在终端内 / 不弹浏览器：**
+
+- 启动 ace-tool-rs 时加上 `--no-webbrowser-enhance-prompt`。
+- 在这个模式下，`enhance_prompt` 会直接把 API 返回结果交回 MCP 客户端，不会打开浏览器。
+- 对 OpenCode 这类希望增强结果直接回流到对话里的 agent 工具来说，这通常是更顺滑的用法。
+
 **参数：**
 
 | 参数 | 类型 | 必需 | 描述 |
@@ -210,39 +255,68 @@ $ cat settings.local.json
 
 **API 端点：**
 
-该工具支持多个后端端点，通过 `ACE_ENHANCER_ENDPOINT` 环境变量控制：
+该工具支持多个后端端点，通过 `PROMPT_ENHANCER_ENDPOINT` 环境变量控制（同时支持 `ACE_ENHANCER_ENDPOINT` 作为向后兼容）：
 
 | 端点 | 描述 | 配置方式 |
 |------|------|----------|
 | `new`（默认） | Augment `/prompt-enhancer` 端点 | 使用 `--base-url` 和 `--token` CLI 参数 |
 | `old` | Augment `/chat-stream` 端点（流式） | 使用 `--base-url` 和 `--token` CLI 参数 |
-| `claude` | Claude API (Anthropic) | 使用 `PROMPT_ENHANCER_*` 环境变量 |
-| `openai` | OpenAI API | 使用 `PROMPT_ENHANCER_*` 环境变量 |
-| `gemini` | Gemini API (Google) | 使用 `PROMPT_ENHANCER_*` 环境变量 |
+| `claude` | Claude API (Anthropic `/v1/messages`) | 使用 `PROMPT_ENHANCER_*` 环境变量 |
+| `openai` | OpenAI Chat API (ChatGPT `/v1/chat/completions`) | 使用 `PROMPT_ENHANCER_*` 环境变量 |
+| `gemini` | Gemini API (Google `/v1beta/models/<model>:streamGenerateContent`) | 使用 `PROMPT_ENHANCER_*` 环境变量 |
+| `codex` | Codex API (OpenAI Responses API `/v1/responses`) | 使用 `PROMPT_ENHANCER_*` 环境变量 |
 
 **第三方 API 默认模型：**
 
 | 提供商 | 默认模型 |
 |--------|----------|
-| Claude | `claude-sonnet-4-20250514` |
-| OpenAI | `gpt-4o` |
-| Gemini | `gemini-2.0-flash-exp` |
+| Claude | `claude-sonnet-4-5` |
+| OpenAI | `gpt-5.2` |
+| Gemini | `gemini-3-flash-preview` |
+| Codex | `gpt-5.3-codex` |
 
 **使用 Claude API 的示例：**
 
 ```bash
 # MCP 服务器模式下，--base-url 和 --token 仍然是必需的
-export ACE_ENHANCER_ENDPOINT=claude
+export PROMPT_ENHANCER_ENDPOINT=claude
 export PROMPT_ENHANCER_BASE_URL=https://api.anthropic.com
 export PROMPT_ENHANCER_TOKEN=your-anthropic-api-key
 ace-tool-rs --base-url https://api.example.com --token your-token
 
 # 使用第三方端点的 --enhance-prompt 模式下，--base-url 和 --token 是可选的
-export ACE_ENHANCER_ENDPOINT=claude
+export PROMPT_ENHANCER_ENDPOINT=claude
 export PROMPT_ENHANCER_BASE_URL=https://api.anthropic.com
 export PROMPT_ENHANCER_TOKEN=your-anthropic-api-key
 ace-tool-rs --enhance-prompt "添加用户认证功能"
+
+# 如果还想在第三方增强前注入 search_context，
+# 需要同时提供 ACE 检索用的 --base-url 和 --token
+export PROMPT_ENHANCER_INCLUDE_SEARCH_CONTEXT=1
+ace-tool-rs \
+  --base-url https://api.example.com \
+  --token your-ace-token \
+  --enhance-prompt "添加用户认证功能"
 ```
+
+**使用 Codex API 的示例：**
+
+```bash
+# Codex 使用 OpenAI Responses API (/v1/responses)
+export PROMPT_ENHANCER_ENDPOINT=codex
+export PROMPT_ENHANCER_BASE_URL=https://api.openai.com
+export PROMPT_ENHANCER_TOKEN=your-openai-api-key
+# 可选: export PROMPT_ENHANCER_MODEL=codex-mini
+ace-tool-rs --enhance-prompt "重构认证逻辑"
+```
+
+**第三方增强结合 `search_context` 的说明：**
+
+- 仅对 `claude` / `openai` / `gemini` / `codex` 生效
+- 需要设置 `PROMPT_ENHANCER_INCLUDE_SEARCH_CONTEXT=1`
+- 在 MCP 服务模式下，本来就需要 `--base-url` 和 `--token`
+- 在 `--enhance-prompt` 单次模式下，如果启用了这个开关，也必须额外提供 `--base-url` 和 `--token`
+- 若显式启用但检索失败，工具会返回真实错误，不会静默退回普通增强
 
 ## 支持的文件类型
 
@@ -274,6 +348,22 @@ ace-tool-rs --enhance-prompt "添加用户认证功能"
 - **媒体文件**：`*.png`、`*.jpg`、`*.mp4`、`*.pdf`
 - **锁文件**：`package-lock.json`、`yarn.lock`、`Cargo.lock`
 
+### 自定义排除项
+
+您可以在项目根目录创建 `.aceignore` 文件来自定义文件过滤规则，语法与 `.gitignore` 相同：
+
+```gitignore
+# 排除特定目录
+my-private-folder/
+temp-data/
+
+# 排除文件模式
+*.local
+*.secret
+```
+
+`.gitignore` 和 `.aceignore` 的规则会合并使用，冲突时 `.aceignore` 优先。
+
 ## 架构
 
 ```
@@ -285,6 +375,7 @@ ace-tool-rs/
 │   ├── enhancer/
 │   │   ├── mod.rs
 │   │   ├── prompt_enhancer.rs  # 提示词增强编排
+│   │   ├── server.rs           # Web UI HTTP 服务器
 │   │   └── templates.rs        # 增强提示词模板
 │   ├── index/
 │   │   ├── mod.rs
@@ -299,7 +390,8 @@ ace-tool-rs/
 │   │   ├── augment.rs   # Augment New/Old 端点
 │   │   ├── claude.rs    # Claude API (Anthropic)
 │   │   ├── openai.rs    # OpenAI API
-│   │   └── gemini.rs    # Gemini API (Google)
+│   │   ├── gemini.rs    # Gemini API (Google)
+│   │   └── codex.rs     # Codex API (OpenAI Responses API)
 │   ├── strategy/
 │   │   ├── mod.rs
 │   │   ├── adaptive.rs  # AIMD 算法实现
@@ -312,6 +404,7 @@ ace-tool-rs/
 │       └── project_detector.rs  # 项目工具
 └── tests/               # 集成测试
     ├── config_test.rs
+    ├── enhancer_server_test.rs
     ├── index_test.rs
     ├── mcp_test.rs
     ├── prompt_enhancer_test.rs
@@ -412,7 +505,7 @@ cargo clippy
 
 ## 限制
 
-- 仅处理根目录的 `.gitignore` 文件（不支持嵌套的 `.gitignore` 文件）
+- 仅处理根目录的 `.gitignore` 和 `.aceignore` 文件（不支持嵌套的忽略文件）
 - 需要网络访问索引 API
 - 最大文件大小：每个文件 500KB
 - 最大批次大小：每次上传批次 5MB

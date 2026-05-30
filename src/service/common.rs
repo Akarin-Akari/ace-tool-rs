@@ -16,9 +16,10 @@ pub const ENV_ENHANCER_TOKEN: &str = "PROMPT_ENHANCER_TOKEN";
 pub const ENV_ENHANCER_MODEL: &str = "PROMPT_ENHANCER_MODEL";
 
 /// Default models for third-party APIs
-pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-4-5-20250929";
-pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.2-codex";
+pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-4-5";
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.2";
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-3-flash-preview";
+pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.3-codex";
 
 // ====== Phase 1 Helpers (ADR-4, ADR-8) ======
 
@@ -72,6 +73,8 @@ pub enum EnhancerEndpoint {
     OpenAI,
     /// Use Gemini API (Google)
     Gemini,
+    /// Use Codex API (OpenAI Responses API)
+    Codex,
 }
 
 impl std::fmt::Display for EnhancerEndpoint {
@@ -83,6 +86,7 @@ impl std::fmt::Display for EnhancerEndpoint {
             Self::Claude => write!(f, "claude"),
             Self::OpenAI => write!(f, "openai"),
             Self::Gemini => write!(f, "gemini"),
+            Self::Codex => write!(f, "codex"),
         }
     }
 }
@@ -104,13 +108,14 @@ impl EnhancerEndpoint {
             "claude" => Ok(Self::Claude),
             "openai" => Ok(Self::OpenAI),
             "gemini" => Ok(Self::Gemini),
+            "codex" => Ok(Self::Codex),
             "auto" => Err(anyhow!(
                 "'auto' is a meta value handled by get_enhancer_endpoint(), \
                  not a valid EnhancerEndpoint variant"
             )),
             other => Err(anyhow!(
                 "Unsupported ACE_ENHANCER_ENDPOINT value: '{}'. \
-                 Valid options: local, claude, gemini, openai, old, new, auto",
+                 Valid options: local, claude, gemini, openai, old, new, codex, auto",
                 other
             )),
         }
@@ -130,7 +135,10 @@ impl EnhancerEndpoint {
 
     /// Check if this is a third-party API (Claude/OpenAI/Gemini)
     pub fn is_third_party(&self) -> bool {
-        matches!(self, Self::Claude | Self::OpenAI | Self::Gemini)
+        matches!(
+            self,
+            Self::Claude | Self::OpenAI | Self::Gemini | Self::Codex
+        )
     }
 }
 
@@ -168,6 +176,11 @@ pub fn provider_defaults(
             "OPENAI_BASE_URL",
             "https://api.openai.com",
         )),
+        EnhancerEndpoint::Codex => Some((
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "https://api.openai.com",
+        )),
         _ => None,
     }
 }
@@ -181,6 +194,7 @@ pub fn default_model_for(endpoint: EnhancerEndpoint) -> &'static str {
         EnhancerEndpoint::Claude => DEFAULT_CLAUDE_MODEL,
         EnhancerEndpoint::Gemini => DEFAULT_GEMINI_MODEL,
         EnhancerEndpoint::OpenAI => DEFAULT_OPENAI_MODEL,
+        EnhancerEndpoint::Codex => DEFAULT_CODEX_MODEL,
         _ => "claude-sonnet-4-5",
     }
 }
@@ -220,6 +234,7 @@ pub fn provider_model_env_chain(endpoint: EnhancerEndpoint) -> &'static [&'stati
         ],
         EnhancerEndpoint::Gemini => &["GEMINI_MODEL"],
         EnhancerEndpoint::OpenAI => &["OPENAI_MODEL"],
+        EnhancerEndpoint::Codex => &["OPENAI_MODEL"],
         _ => &[],
     }
 }
@@ -474,6 +489,51 @@ pub fn build_third_party_prompt(original_prompt: &str) -> Result<String> {
     Ok(format!("{}{}", enhanced_prompt, language_hint))
 }
 
+/// Build API URL by joining base URL with a resource path, deduplicating version segments.
+///
+/// If `base_url` already ends with a version prefix (e.g. `/v1`, `/v1beta`),
+/// and `path` also starts with one, the path's version prefix is stripped
+/// to avoid duplication like `/v1/v1/messages`.
+///
+/// Examples:
+/// - `("https://api.example.com", "/v1/messages")` → `https://api.example.com/v1/messages`
+/// - `("https://api.example.com/v1", "/v1/messages")` → `https://api.example.com/v1/messages`
+/// - `("https://proxy.com/v1beta", "/v1/messages")` → `https://proxy.com/v1beta/messages`
+pub fn build_api_url(base_url: &str, path: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if has_version_suffix(base) {
+        let path = strip_version_prefix(path);
+        format!("{}{}", base, path)
+    } else {
+        format!("{}{}", base, path)
+    }
+}
+
+fn has_version_suffix(url: &str) -> bool {
+    if let Some(pos) = url.rfind("/v") {
+        url[pos + 2..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit())
+    } else {
+        false
+    }
+}
+
+fn strip_version_prefix(path: &str) -> &str {
+    let p = path.strip_prefix('/').unwrap_or(path);
+    if let Some(rest) = p.strip_prefix('v') {
+        if rest.starts_with(|c: char| c.is_ascii_digit()) {
+            // Find end of version segment (next '/' or end of string)
+            if let Some(slash) = rest.find('/') {
+                return &rest[slash..];
+            }
+            return "";
+        }
+    }
+    path
+}
+
 /// Map common authentication errors to consistent error messages
 pub fn map_auth_error(status: u16, provider: &str) -> Option<anyhow::Error> {
     match status {
@@ -568,5 +628,60 @@ mod tests {
         std::env::remove_var(key);
         assert_eq!(read_nonempty_env(key), None);
         assert!(!has_nonempty_env(key));
+    }
+
+    #[test]
+    fn test_build_api_url_no_version_in_base() {
+        assert_eq!(
+            build_api_url("https://api.example.com", "/v1/messages"),
+            "https://api.example.com/v1/messages"
+        );
+        assert_eq!(
+            build_api_url("https://api.example.com/", "/v1/messages"),
+            "https://api.example.com/v1/messages"
+        );
+    }
+
+    #[test]
+    fn test_build_api_url_same_version_dedup() {
+        assert_eq!(
+            build_api_url("https://api.example.com/v1", "/v1/messages"),
+            "https://api.example.com/v1/messages"
+        );
+        assert_eq!(
+            build_api_url("https://api.example.com/v1/", "/v1/messages"),
+            "https://api.example.com/v1/messages"
+        );
+        assert_eq!(
+            build_api_url("https://api.example.com/v1beta", "/v1beta/models/x:gen"),
+            "https://api.example.com/v1beta/models/x:gen"
+        );
+    }
+
+    #[test]
+    fn test_build_api_url_cross_version_dedup() {
+        // base has v1beta, path has v1 → keep v1beta, strip v1
+        assert_eq!(
+            build_api_url("https://proxy.example.com/v1beta", "/v1/messages"),
+            "https://proxy.example.com/v1beta/messages"
+        );
+        // base has v2, path has v1 → keep v2, strip v1
+        assert_eq!(
+            build_api_url("https://proxy.example.com/v2", "/v1/chat/completions"),
+            "https://proxy.example.com/v2/chat/completions"
+        );
+        // base has v1, path has v1beta → keep v1, strip v1beta
+        assert_eq!(
+            build_api_url("https://proxy.example.com/v1", "/v1beta/models/x:gen"),
+            "https://proxy.example.com/v1/models/x:gen"
+        );
+    }
+
+    #[test]
+    fn test_build_api_url_non_version_path_preserved() {
+        assert_eq!(
+            build_api_url("https://api.example.com/vertex", "/v1/messages"),
+            "https://api.example.com/vertex/v1/messages"
+        );
     }
 }
