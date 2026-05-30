@@ -175,13 +175,52 @@ pub fn provider_defaults(
 /// Hardcoded fallback model for a given provider.
 ///
 /// This is the lowest-priority entry in the model fallback chain
-/// (PROMPT_ENHANCER_MODEL > ANTHROPIC_MODEL/GEMINI_MODEL/OPENAI_MODEL > this).
+/// (PROMPT_ENHANCER_MODEL > provider env chain > this).
 pub fn default_model_for(endpoint: EnhancerEndpoint) -> &'static str {
     match endpoint {
         EnhancerEndpoint::Claude => DEFAULT_CLAUDE_MODEL,
         EnhancerEndpoint::Gemini => DEFAULT_GEMINI_MODEL,
         EnhancerEndpoint::OpenAI => DEFAULT_OPENAI_MODEL,
         _ => "claude-sonnet-4-5",
+    }
+}
+
+/// Provider-specific environment variable chain for model resolution.
+///
+/// Returned in priority order — the first non-empty value wins. Each
+/// chain starts with the Anthropic/Gemini/OpenAI standard name, then
+/// (for Claude) falls back to Claude Code's private `ANTHROPIC_DEFAULT_*`
+/// variants. The `_MODEL` variant (with `[1M]` suffix on relays like
+/// anyrouter) is preferred over the bare `_MODEL_NAME` variant so that
+/// users of 1M-context relays get the right model name without extra
+/// configuration.
+///
+/// Priority for Claude (per ADR-5 amendment 2026-05-22):
+///   1. `ANTHROPIC_MODEL`                       — Anthropic standard
+///   2. `ANTHROPIC_DEFAULT_OPUS_MODEL`          — Claude Code private, `[1M]` suffix
+///   3. `ANTHROPIC_DEFAULT_OPUS_MODEL_NAME`     — Claude Code private, no suffix
+///   4. `ANTHROPIC_DEFAULT_SONNET_MODEL`
+///   5. `ANTHROPIC_DEFAULT_SONNET_MODEL_NAME`
+///   6. `ANTHROPIC_DEFAULT_HAIKU_MODEL`
+///   7. `ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME`
+///
+/// Opus is ranked above Sonnet/Haiku to match relay deployments that
+/// only provision the top tier (e.g. anyrouter as of 2026-05). End users
+/// can still override the entire chain via `PROMPT_ENHANCER_MODEL`.
+pub fn provider_model_env_chain(endpoint: EnhancerEndpoint) -> &'static [&'static str] {
+    match endpoint {
+        EnhancerEndpoint::Claude => &[
+            "ANTHROPIC_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+        ],
+        EnhancerEndpoint::Gemini => &["GEMINI_MODEL"],
+        EnhancerEndpoint::OpenAI => &["OPENAI_MODEL"],
+        _ => &[],
     }
 }
 
@@ -262,24 +301,23 @@ pub fn resolve_third_party_config(
     let base_url = base_url.trim_end_matches('/').to_string();
 
     // ---- Model resolution ----
-    let provider_model_env = match endpoint {
-        EnhancerEndpoint::Claude => Some("ANTHROPIC_MODEL"),
-        EnhancerEndpoint::Gemini => Some("GEMINI_MODEL"),
-        EnhancerEndpoint::OpenAI => Some("OPENAI_MODEL"),
-        _ => None,
-    };
+    // Per ADR-5 amendment (2026-05-22): walk the full provider env chain
+    // so that Claude Code's private `ANTHROPIC_DEFAULT_*_MODEL[_NAME]`
+    // variants are picked up automatically. See `provider_model_env_chain`.
     let (model, model_source) = if let Some(m) = read_nonempty_env(ENV_ENHANCER_MODEL) {
         (m, ENV_ENHANCER_MODEL.to_string())
-    } else if let Some(env_name) = provider_model_env {
-        if let Some(m) = read_nonempty_env(env_name) {
-            (m, env_name.to_string())
-        } else {
-            let default = default_model_for(endpoint);
-            (default.to_string(), format!("default ({})", default))
-        }
     } else {
-        let default = default_model_for(endpoint);
-        (default.to_string(), format!("default ({})", default))
+        let chain = provider_model_env_chain(endpoint);
+        let found = chain
+            .iter()
+            .find_map(|key| read_nonempty_env(key).map(|v| (v, *key)));
+        match found {
+            Some((m, key)) => (m, key.to_string()),
+            None => {
+                let default = default_model_for(endpoint);
+                (default.to_string(), format!("default ({})", default))
+            }
+        }
     };
 
     Ok(ResolvedThirdPartyConfig {

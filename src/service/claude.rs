@@ -79,14 +79,25 @@ pub async fn call_claude_endpoint(
 
     info!("Calling Claude API: {}", url);
 
-    let response = client
+    // Smart 1M-context beta header: enable when model name contains the
+    // `[1M]` suffix used by relays like anyrouter to signal 1M routing.
+    // Per ADR-5 amendment (2026-05-23): see provider_model_env_chain.
+    let needs_1m_beta = config.model.contains("[1M]") || config.model.contains("[1m]");
+    if needs_1m_beta {
+        info!("Enabling 1M context beta header for model: {}", config.model);
+    }
+
+    let mut request = client
         .post(&url)
         .header("Content-Type", "application/json")
         .header("x-api-key", &config.token)
-        .header("anthropic-version", "2023-06-01")
-        .json(&payload)
-        .send()
-        .await;
+        .header("anthropic-version", "2023-06-01");
+
+    if needs_1m_beta {
+        request = request.header("anthropic-beta", "context-1m-2025-08-07");
+    }
+
+    let response = request.json(&payload).send().await;
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
     info!("Claude API call completed in {}ms", duration_ms);
