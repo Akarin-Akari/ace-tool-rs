@@ -64,6 +64,9 @@ rayon = "1.10"
 # Hex encoding
 hex = "0.4"
 
+# Random number generation for jitter
+rand = "0.8"
+
 # UUID for session management
 uuid = { version = "1", features = ["v4"] }
 

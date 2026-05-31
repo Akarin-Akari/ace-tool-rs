@@ -11,6 +11,7 @@ use bincode::Options;
 use encoding_rs::{GB18030, GBK, UTF_8, WINDOWS_1252};
 use futures::stream::{FuturesUnordered, StreamExt};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use rand::Rng;
 use rayon::prelude::*;
 use regex::Regex;
 use reqwest::Client;
@@ -36,7 +37,7 @@ const MAX_BATCH_SIZE: usize = 1024 * 1024;
 const MAX_INDEX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Current index format version
-const CURRENT_INDEX_VERSION: u32 = 2;
+const CURRENT_INDEX_VERSION: u32 = 3;
 
 /// Generate a unique request ID
 fn generate_request_id() -> String {
@@ -57,7 +58,7 @@ pub struct Blob {
     pub content: String,
 }
 
-/// Index data structure (v2 format with mtime support)
+/// Index data structure (v3 format with checkpoint support)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IndexData {
     /// Index format version
@@ -66,6 +67,12 @@ pub struct IndexData {
     pub config_hash: String,
     /// File entries, key is normalized relative path (forward slashes)
     pub entries: HashMap<String, FileEntry>,
+    /// Server-side checkpoint ID for incremental queries
+    #[serde(default)]
+    pub checkpoint_id: Option<String>,
+    /// Last sync timestamp (seconds since UNIX epoch)
+    #[serde(default)]
+    pub last_sync_time: Option<u64>,
 }
 
 impl IndexData {
@@ -168,6 +175,7 @@ struct BlobsPayload {
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
     formatted_retrieval: Option<String>,
+    checkpoint_id: Option<String>,
 }
 
 /// Calculate configuration fingerprint for detecting index-affecting config changes
@@ -827,6 +835,16 @@ impl IndexManager {
                 .timeout(Duration::from_millis(timeout_ms))
                 .header("Content-Type", "application/json")
                 .header("User-Agent", user_agent)
+                .header("sec-ch-ua", r#""Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121""#)
+                .header("sec-ch-ua-mobile", "?0")
+                .header("sec-ch-ua-platform", "\"Windows\"")
+                .header("Accept", "*/*")
+                .header("Origin", "vscode-file://vscode-app")
+                .header("Sec-Fetch-Site", "cross-site")
+                .header("Sec-Fetch-Mode", "cors")
+                .header("Sec-Fetch-Dest", "empty")
+                .header("Accept-Encoding", "gzip, deflate, br")
+                .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
                 .header("x-request-id", &request_id)
                 .header("x-request-session-id", get_session_id())
                 .header("Authorization", format!("Bearer {}", token))
@@ -955,7 +973,9 @@ impl IndexManager {
                     }
 
                     if status.is_server_error() && attempt < max_retries - 1 {
-                        let wait_time = 1000 * (1 << attempt);
+                        let base_delay = 1000 * (1 << attempt);
+                        let jitter = rand::thread_rng().gen_range(0..200);
+                        let wait_time = base_delay + jitter;
                         if let Some(ref req_log) = http_request_log {
                             let response_log = HttpResponseLog {
                                 status: status.as_u16(),
@@ -1025,7 +1045,9 @@ impl IndexManager {
                     }
 
                     if attempt < max_retries - 1 {
-                        let wait_time = 1000 * (1 << attempt);
+                        let base_delay = 1000 * (1 << attempt);
+                        let jitter = rand::thread_rng().gen_range(0..200);
+                        let wait_time = base_delay + jitter;
                         warn!(
                             "Request failed (attempt {}/{}): {}, retrying in {}ms...",
                             attempt + 1,
@@ -1137,6 +1159,8 @@ impl IndexManager {
             version: CURRENT_INDEX_VERSION,
             config_hash: self.config_hash.clone(),
             entries: HashMap::with_capacity(results.len()),
+            checkpoint_id: None,
+            last_sync_time: None,
         };
 
         let mut cached_count = 0usize;
@@ -1271,6 +1295,17 @@ impl IndexManager {
             return Err(anyhow!("No blobs found after indexing"));
         }
 
+        // Use checkpoint_id if available (MVP: simple version)
+        let use_checkpoint = index_data.checkpoint_id.is_some();
+        let checkpoint_id = index_data.checkpoint_id.clone();
+
+        if use_checkpoint {
+            info!(
+                checkpoint_id = ?checkpoint_id,
+                "search_context: using cached checkpoint_id"
+            );
+        }
+
         // Execute search with 429/5xx retry (same strategy as upload_batch_internal)
         let chunk_count = blob_names.len();
         info!(chunks = chunk_count, "search_context: searching");
@@ -1285,8 +1320,12 @@ impl IndexManager {
             let request = SearchRequest {
                 information_request: query.to_string(),
                 blobs: BlobsPayload {
-                    checkpoint_id: None,
-                    added_blobs: blob_names.clone(),
+                    checkpoint_id: checkpoint_id.clone(),
+                    added_blobs: if use_checkpoint {
+                        Vec::new()  // With checkpoint: don't send added_blobs
+                    } else {
+                        blob_names.clone()  // Without checkpoint: send full list
+                    },
                     deleted_blobs: Vec::new(),
                 },
                 dialog: Vec::new(),
@@ -1322,6 +1361,16 @@ impl IndexManager {
                 .timeout(Duration::from_secs(self.retrieval_timeout_secs))
                 .header("Content-Type", "application/json")
                 .header("User-Agent", &self.user_agent)
+                .header("sec-ch-ua", r#""Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121""#)
+                .header("sec-ch-ua-mobile", "?0")
+                .header("sec-ch-ua-platform", "\"Windows\"")
+                .header("Accept", "*/*")
+                .header("Origin", "vscode-file://vscode-app")
+                .header("Sec-Fetch-Site", "cross-site")
+                .header("Sec-Fetch-Mode", "cors")
+                .header("Sec-Fetch-Dest", "empty")
+                .header("Accept-Encoding", "gzip, deflate, br")
+                .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
                 .header("x-request-id", &request_id)
                 .header("x-request-session-id", get_session_id())
                 .header("Authorization", format!("Bearer {}", self.token))
@@ -1382,6 +1431,27 @@ impl IndexManager {
                             );
                         }
                         let search_response: SearchResponse = serde_json::from_str(&body_text)?;
+
+                        // Save checkpoint_id if returned by server
+                        if let Some(new_checkpoint_id) = search_response.checkpoint_id {
+                            let mut updated_index = self.load_index();
+                            updated_index.checkpoint_id = Some(new_checkpoint_id.clone());
+                            updated_index.last_sync_time = Some(
+                                std::time::SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs()
+                            );
+                            if let Err(e) = self.save_index(&updated_index) {
+                                warn!("Failed to save checkpoint_id: {}", e);
+                            } else {
+                                info!(
+                                    checkpoint_id = %new_checkpoint_id,
+                                    "search_context: saved new checkpoint_id"
+                                );
+                            }
+                        }
+
                         return match search_response.formatted_retrieval {
                             Some(result) if !result.is_empty() => {
                                 info!(
@@ -1398,6 +1468,21 @@ impl IndexManager {
                     }
 
                     let text = resp.text().await.unwrap_or_default();
+
+                    // Handle 404 checkpoint expired error
+                    if status == 404 && text.to_lowercase().contains("checkpoint") {
+                        warn!("Checkpoint expired (404), clearing cache and will retry with full reindex");
+                        let mut updated_index = self.load_index();
+                        updated_index.checkpoint_id = None;
+                        updated_index.last_sync_time = None;
+                        if let Err(e) = self.save_index(&updated_index) {
+                            warn!("Failed to clear checkpoint_id: {}", e);
+                        }
+                        // Continue to retry with checkpoint_id = None
+                        if attempt < max_retries - 1 {
+                            continue;
+                        }
+                    }
 
                     if status == 429 && attempt < max_retries - 1 {
                         let wait_time = retry_after * 1000;
@@ -1426,7 +1511,9 @@ impl IndexManager {
                     }
 
                     if status.is_server_error() && attempt < max_retries - 1 {
-                        let wait_time = 1000 * (1 << attempt);
+                        let base_delay = 1000 * (1 << attempt);
+                        let jitter = rand::thread_rng().gen_range(0..200);
+                        let wait_time = base_delay + jitter;
                         if let Some(ref req_log) = http_request_log {
                             http_logger::log_request(
                                 Some(&self.project_root),
@@ -1478,7 +1565,9 @@ impl IndexManager {
                         );
                     }
                     if attempt < max_retries - 1 {
-                        let wait_time = 1000 * (1 << attempt);
+                        let base_delay = 1000 * (1 << attempt);
+                        let jitter = rand::thread_rng().gen_range(0..200);
+                        let wait_time = base_delay + jitter;
                         warn!(
                             attempt = attempt + 1,
                             max_retries,
